@@ -212,12 +212,16 @@ def test_image_prefix_override(mgr, monkeypatch):
 
 
 def test_share_url_without_domain(monkeypatch):
-    """INSTANTBOX_CONSOLE_DOMAIN 留空时用同域相对路径，不依赖泛域名。"""
+    """INSTANTBOX_CONSOLE_DOMAIN 留空时用同域相对路径，不依赖泛域名。
+
+    返回 '/console/<pod>'：由同一个 nginx 在 /console/ 下反代到 Pod 的 1588，
+    浏览器用当前页面的协议/主机/端口，NodePort、Ingress、端口转发都不用改配置。
+    """
     monkeypatch.setattr(im.cfg, 'CONSOLE_DOMAIN', '')
     monkeypatch.setattr(im.cfg, 'CONSOLE_PORT', '')
     monkeypatch.setattr(im.cfg, 'SCHEME', 'http')
     m = im.InstantboxManager.__new__(im.InstantboxManager)
-    assert m.share_url('instantbox-managed-abc') == 'http://instantbox-managed-abc'
+    assert m.share_url('instantbox-managed-abc') == '/console/instantbox-managed-abc'
 
 
 def test_share_url_custom_port(monkeypatch):

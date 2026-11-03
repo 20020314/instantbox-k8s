@@ -200,7 +200,7 @@ class App extends Component {
                       const containerInfo = JSON.parse(
                         getItem("containerInfo")
                       );
-                      window.open(containerInfo.shareUrl.replace('http://:', `http://${window.location.hostname}:`));
+                      window.open(containerInfo.shareUrl);
                     }}
                     style={{ margin: 10 }}
                   >
@@ -228,7 +228,7 @@ class App extends Component {
           title={this.t('keyword.notice')}
           visible={this.state.skipModalVisible}
           onOk={() => {
-            window.open(this.state.container.shareUrl.replace('http://:', `http://${window.location.hostname}:`));
+            window.open(this.state.container.shareUrl);
             this.setState({ skipModalVisible: false });
           }}
           okText={this.t('keyword.ok')}

@@ -248,8 +248,18 @@ class InstantboxManager(object):
         return self.CONTAINER_PREFIX + suffix
 
     def share_url(self, container_name):
+        """沙箱控制台地址。
+
+        没配 CONSOLE_DOMAIN 时返回**相对路径** `/console/<pod>`：控制台由同一个 nginx
+        在 /console/ 下反代，同域访问，前端直接 window.open 即可。
+        （上游返回的是 'http://:<port>' 这种缺主机的地址，前端靠 .replace('http://:', ...)
+          打补丁——在 NodePort/Ingress 场景下会拼出错误的主机名。）
+        """
         scheme, domain, port = cfg.console_base_url()
-        host = '{}.{}'.format(container_name, domain) if domain else container_name
+        if not domain:
+            # 相对路径：浏览器自动用当前页面的协议/主机/端口
+            return '/console/{}'.format(container_name)
+        host = '{}.{}'.format(container_name, domain)
         if port and port not in ('80', '443'):
             host = '{}:{}'.format(host, port)
         return '{}://{}'.format(scheme, host)
