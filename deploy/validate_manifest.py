@@ -53,11 +53,14 @@ assert fe['spec']['template']['spec']['automountServiceAccountToken'] is False
 print('[ok] frontend-web: 纯静态，不挂 SA token')
 
 # 对外 NodePort Service 必须指向 gateway
+# 注意：api.deserialize 会把 spec.selector 转成 V1LabelSelector 对象，
+# 不能直接和 dict 比，要取 .match_labels
 ext = [d for d in docs if d['kind'] == 'Service'
        and d['metadata']['name'] == 'instantbox'][0]
-assert ext['spec']['selector'] == {'app': 'instantbox-gateway'}, \
-    '对外入口 selector 必须指向 gateway'
-assert ext['spec']['ports'][0]['nodePort'] == 30888
+ext_obj = api.deserialize(json.dumps(ext), V1Service, 'application/json')
+assert ext_obj.spec.selector == {'app': 'instantbox-gateway'}, \
+    '对外入口 selector 必须指向 gateway，实际 {}'.format(ext_obj.spec.selector)
+assert ext_obj.spec.ports[0].node_port == 30888
 print('[ok] 对外入口 NodePort 30888 -> gateway')
 
 role = [d for d in docs if d['kind'] == 'Role'][0]

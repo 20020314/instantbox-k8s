@@ -17,16 +17,16 @@
 
 ```
                      ┌──────────────────────────────────────────────┐
-  浏览器 ───────────► │ frontend (nginx Deployment, 2 副本)           │
-                     │  /            → React 静态页                  │
-                     │  /api/*       → http://server:65501          │
+  浏览器 ───────────► │ gateway (Caddy Deployment, 2 副本)            │
+   :30888             │  /              → /srv/www 静态页             │
+                     │  /api/*         → http://server:65501        │
                      │  /console/<pod> → http://<pod>:1588  (WS)    │
                      └───────┬──────────────────────┬───────────────┘
                              │                      │
                     ┌────────▼────────┐   ┌─────────▼──────────────┐
                     │ server (flask)  │   │ 沙箱 Pod                │
                     │ SA: instantbox- │   │ instantbox-managed-xxx  │
-                    │     server      │   │ image: instantbox/ubuntu│
+                    │     server      │   │ image: sandbox-*        │
                     │ ↓ k8s API       │   │ cmd: ttyd -p 1588 -W bash│
                     │ create/delete   │   └────────────────────────┘
                     │ Pod             │
@@ -39,8 +39,12 @@
 ```
 
 - **server** 只做控制面：建 Pod、删 Pod、回收过期 Pod。不碰任何转发流量，因此可以随便重启。
-- **frontend** 一身两职：静态页 + 反代（下文也叫 worker）。这是 K8s 下替代 docker DNS 的关键——
-  nginx 用 `resolver` + 变量式 `proxy_pass`，把 `/console/<pod 名>` 动态解析到同 namespace 的 Pod IP。
+- **gateway**（Caddy）是对外唯一入口，三件事：发静态页、反代 `/api`、反代 `/console/<pod>`（含 WebSocket）。
+  这是 K8s 下替代 docker DNS 的关键——用正则把 `/console/<pod 名>` 还原成
+  `<pod>.<ns>.svc.cluster.local:1588` 再转发。
+- **frontend-web**（nginx）是**纯静态**镜像，不含任何反代逻辑。默认不挂在对外入口上，
+  留给「Ingress / CDN 直接分流静态资源」或「静态资源想单独扩缩容」的场景。
+  两个镜像由同一个 `frontend/Dockerfile` 的两个 target 产出，共用构建缓存。
 - **CronJob** 替代上游的 cron 容器（wget /prune）。
 
 ---
@@ -57,12 +61,12 @@ instantbox-k8s/
 │   ├── test_manager.py         # 18 个单测，用假 client，不连集群
 │   ├── Dockerfile
 │   └── requirements.txt
-├── frontend/                   # React (antd 3 / CRA 2) + nginx 反代
+├── frontend/                   # React (antd 3 / CRA 2)，一个 Dockerfile 出两个镜像
 │   ├── src/...                 # 已移除端口表单、校验、i18n 文案
-│   ├── nginx-main.conf         # http 级配置（限速、WS upgrade map）
-│   ├── default.conf            # server 级配置（/api、/console 反代）
+│   ├── Caddyfile               # gateway target：静态 + /api + /console（含 WS）
+│   ├── nginx-web.conf          # web target：纯静态 server 块，无任何反代
 │   ├── patch-sass-loader.js    # 构建期补丁：sass-loader@7 -> dart-sass（见坑 #10）
-│   └── Dockerfile
+│   └── Dockerfile              # multi-stage, target=web / target=gateway
 ├── deploy/
 │   ├── instantbox-k8s.yaml     # Namespace/SA/Role/RoleBinding/CM/Deployments/Services/CronJob
 │   └── validate_manifest.py    # 离线校验清单字段
@@ -86,19 +90,25 @@ instantbox-k8s/
 
 1. `server-test` —— 跑后端单测（假 client，不连集群）+ 离线校验 k8s 清单
 2. `frontend-build` —— `npm ci` → 打 sass-loader 补丁 → babel 语法检查 → **真实 `npm run build`**
-3. `build-server` / `build-frontend` —— 依赖上面两个 job 通过后，用 buildx 构建并推到 **ghcr.io**
+3. `build-server` / `build-frontend-web` / `build-gateway` / `build-sandbox` —— 依赖前两个 job
+   通过后，用 buildx 构建并推到 **ghcr.io**
 
 镜像地址（构建产物固定打三个 tag：`main` / `latest` / `sha-<7位commit>`，**同时支持 amd64 与 arm64**）：
 
 ```
-ghcr.io/20020314/instantbox-server:latest    # 或 :main / :sha-xxxxxxx
-ghcr.io/20020314/instantbox-frontend:latest
+ghcr.io/20020314/instantbox-server:latest      # Flask 控制面
+ghcr.io/20020314/instantbox-gateway:latest     # Caddy 边缘反代（对外入口，含静态页）
+ghcr.io/20020314/instantbox-frontend:latest    # 纯静态前端（无任何反代）
 ```
+
+> `instantbox-gateway` 和 `instantbox-frontend` **来自同一个 Dockerfile 的两个 target**
+> （`gateway` / `web`），共用 `frontend-build` 的构建产物的缓存。
+> 日常部署只需要 gateway；frontend 是给「Ingress 或 CDN 直接分流静态资源」准备的。
 
 > arm64 是必需的：目标集群是 NVIDIA Spark（GB10, arm64）。单架构镜像在 arm64 节点上会
 > `ErrImagePull: no match for platform in manifest`。
 
-两个 package 的可见性已是 **public**，集群无需 imagePullSecret 即可直拉；
+这几个 package 的可见性已是 **public**，集群无需 imagePullSecret 即可直拉；
 换成自己的 fork 时，确认 package 是 public，否则给 `instantbox` namespace 配 imagePullSecret。
 
 本地手工构建（**可选**；CI 已经全包，本机不需要装 node / python / docker）：
@@ -107,7 +117,10 @@ ghcr.io/20020314/instantbox-frontend:latest
 docker build -t instantbox-server:latest ./server \
   --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
-docker build -t instantbox-frontend:latest ./frontend \
+# 两个 target 各自构建
+docker build --target web     -t instantbox-frontend:latest ./frontend \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+docker build --target gateway -t instantbox-gateway:latest ./frontend \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 ```
 
@@ -241,29 +254,47 @@ rules:
 
 ### 3. 转发：docker DNS → 集群 DNS
 
-上游 nginx：`resolver 127.0.0.11`（docker 内嵌 DNS），`proxy_pass http://$1:1588`。
-K8s 里改成集群 DNS，并且把 pod 名限制得死死的（防 SSRF，避免有人拿 `/console/kubernetes` 打 apiserver）：
+上游用 nginx + `resolver 127.0.0.11`（docker 内嵌 DNS）+ `proxy_pass http://$1:1588`。
+本项目换成 **Caddy**，核心是同一个思路：把 `/console/<pod>` 里的 pod 名取出来，
+拼成 FQDN 再转发。pod 名限制得死死的（防 SSRF，避免有人拿 `/console/kubernetes` 打 apiserver）：
 
-```nginx
-location ~ "^/console/(instantbox-managed-[a-z0-9]{4,40})(/.*)?$" {
-    set $pod_name $1;
-    set $console_upstream http://$pod_name.instantbox.svc.cluster.local:1588;
-    resolver 10.43.0.10 valid=10s ipv6=off;
-    rewrite "^/console/[^/]+(/.*)?$" $1 break;
-    proxy_pass $console_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $connection_upgrade;
-    proxy_buffering off;
+```caddyfile
+handle /console/* {
+    @console path_regexp console ^/console/(instantbox-managed-[a-z0-9]{4,40})(?:/(.*))?$
+
+    handle @console {
+        # 有剩余路径：剥掉 /console/<pod> 前缀，原样透传给 ttyd
+        @has_rest vars {re.console.2} != ""
+        handle @has_rest {
+            uri strip_prefix /console/{re.console.1}
+            reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+                import console_proxy
+            }
+        }
+        # 无尾斜杠：上游就是 "/"
+        handle {
+            rewrite * /
+            reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+                import console_proxy
+            }
+        }
+    }
+
+    # 名字不合规：明确 404，绝不漏到静态兜底
+    handle {
+        respond "unknown console target" 404
+    }
 }
 ```
 
-- 正则直接写死 `instantbox-managed-` 前缀，且只允许 `[a-z0-9]`，**`. / :` 全被排除**，SSRF 面收窄。
-- 前缀如果要改，`INSTANTBOX_PREFIX` 和这里必须同步改。
-- 上游必须写 **FQDN** `$pod_name.<ns>.svc.cluster.local`，见坑 #12。
-- resolver 必须写集群 DNS 的 **IP**（k3s 默认 `10.43.0.10`，标准 kubeadm 集群一般是 `10.96.0.10`）：
-  `kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'`。
-- 裸 Pod 没有 A 记录，名字能解析是靠 server 端给每个沙箱建的**同名 headless Service**，见坑 #13。
+- 正则写死 `instantbox-managed-` 前缀，且只允许 `[a-z0-9]`，**`.` `/` `:` `@` 全被排除**，SSRF 面收窄。
+  前缀如果要改，`INSTANTBOX_PREFIX` 和这里必须同步改。
+- **upstream 必须写 FQDN** `<pod>.<ns>.svc.cluster.local`，见坑 #12（Go 的 resolver 和 nginx 一样不做 search 补全）。
+- 裸 Pod 没有 A 记录，名字能解析是靠 server 端给每个沙箱建的**同名 headless Service**，见坑 #14。
+- Caddy 的 `reverse_proxy` 目标**支持占位符**，但要求「地址不带 scheme 且必须带端口」
+  （端口这里是静态后缀 `:{$TTYD_PORT::1588}`）——官方文档 Upstream addresses 一节有说明。
+- **不要手写 `X-Forwarded-For/-Proto/-Host`**：Caddy 自动处理，写了 `caddy validate` 会警告
+  `Unnecessary header_up`。只需要补 `Host` 和 `X-Real-IP`。
 
 ---
 
@@ -423,14 +454,55 @@ containerInfo.shareUrl.replace('http://:', `http://${window.location.hostname}:`
 浏览器打开即走当前域名，天然支持 https 和 Ingress。这段 replace 代码留着也不会坏事
 （匹配不到 `http://:` 就不替换），但建议后续删掉。
 
-### 8. nginx 里 `proxy_pass` 带变量必须自己拼 URI
+### 8. 为什么用 Caddy 而不是 nginx（`/console/<pod>` 500 的真凶）
 
-`proxy_pass $console_upstream;` 这种变量形式，nginx **不会**自动把 location 匹配掉的
-路径段拼回去，必须显式 `rewrite ... break`。上游那版写的是
-`rewrite ^/console/([a-z0-9_]+)/?(.*) /$2 break;`，注意它是把 `$2` 当路径——
-对 `/console/abc` 而言 `$2` 是空串，会变成 `/`，ttyd 能对付；但对 ttyd 的
-`/ws` 之类子路径（`/console/abc/ws`）也是 ok 的。本项目用 `rewrite ^/console/[^/]+(/.*)?$ $1 break;`
-等价且更短。
+原方案是 nginx。前端 `shareUrl` 返回的是 `/console/<pod>`——**不带尾部斜杠**。
+nginx 里那段反代写的是：
+
+```nginx
+rewrite "^/console/[^/]+(/.*)?$" $1 break;
+```
+
+对 `/console/instantbox-managed-xxx` 这条路径，捕获组 `$1` 是**空串**，nginx 直接判定：
+
+```
+[error] the rewritten URI has a zero length
+```
+
+→ **500**。而 `/console/<pod>/`（带斜杠）就正常，`/console/<pod>/ws` 也正常——
+所以只要测试时手滑带了斜杠，就永远发现不了这个问题。
+
+三个选择：
+1. 后端把 `shareUrl` 改成带尾斜杠 —— 治标，用户手输或第三方拼出来的 URL 还是会 500
+2. nginx 里加 `if ($1 = "") { rewrite ... / break; }` —— `if` 在 nginx location 里是恶魔
+3. **换 Caddy** —— `uri strip_prefix` 对空串天然安全，剩空即 `/`
+
+选了 3，顺带解决另外两件事：
+
+- **`handle` 是有序独占匹配**，谁匹配谁负责，不会像 nginx 的 regex location 那样跟
+  `try_files ... /index.html` 互相穿透（静态资源被 SPA 兜底吃掉是 nginx 的经典坑）
+- **WebSocket 原生支持**，不用手写 `Upgrade` / `Connection` 那套 map
+- 配置能用 `caddy validate` / `caddy adapt` 离线校验，改之前就知道错在哪
+
+Caddyfile 写完之后**先在集群里跑一遍 `caddy validate` 再提交**（省一轮 CI）：
+
+```bash
+kubectl -n instantbox create cm caddy-t --from-file=Caddyfile=frontend/Caddyfile
+kubectl -n instantbox run caddy-validate --restart=Never --image=caddy:2-alpine \
+  --overrides='{"spec":{"containers":[{"name":"v","image":"caddy:2-alpine",
+    "command":["caddy","validate","--config","/etc/caddy/Caddyfile","--adapter","caddyfile"],
+    "volumeMounts":[{"name":"cf","mountPath":"/etc/caddy"}]}],
+    "volumes":[{"name":"cf","configMap":{"name":"caddy-t"}}]}}'
+kubectl -n instantbox logs caddy-validate
+```
+
+Caddyfile 有两个容易踩的解析顺序问题：
+
+| 现象 | 原因 |
+|---|---|
+| `File to import not found: console_proxy` | snippet **必须定义在第一次被 `import` 之前**，放文件尾部不行 |
+| `unrecognized directive: -Server` | `-Server` 是 `header` 指令的参数，不能裸写在 site 块里；写 `header -Server` |
+| `Unnecessary header_up X-Forwarded-For` | Caddy 自动处理这三个头，手写只会刷警告 |
 
 ### 9. 关于"删除即回收"与"TTL 兜底"
 
@@ -469,28 +541,30 @@ containerInfo.shareUrl.replace('http://:', `http://${window.location.hostname}:`
 国内弱网下 `ADD` 会卡到超时（我在本机实测 `curl` 25s 拿不到）。现在把清单**放进仓库**
 `server/manifest.json` 一起 COPY 进镜像，构建和运行都不依赖外网。
 
-### 12. nginx 的 resolver 不做 search 域补全（`/console` 502 的真凶）
+### 12. 反向代理的 resolver 不做 search 域补全（`/console` 502 的真凶）
 
 现象：沙箱 Pod `Running`、headless Service 也建好了，容器里 `nslookup <pod>`、`wget http://<pod>:1588`
-全都通，但 nginx 一直报：
+全都通，但反代一直报：
 
 ```
-[error] instantbox-managed-xxx could not be resolved (3: Host not found)
+nginx: [error] instantbox-managed-xxx could not be resolved (3: Host not found)
+caddy: dial tcp: lookup instantbox-managed-xxx on 10.43.0.10:53: no such host
 ```
 
-原因是 **nginx 的 `resolver` 是纯 DNS 客户端，它把主机名原样（带尾点）发给 DNS 服务器**，
-不会像 glibc / musl 的 `getaddrinfo` 那样按 `/etc/resolv.conf` 的 `search` 域逐个补全。
-所以 `nslookup` 能通（libc 帮你补了 `instantbox.svc.cluster.local`），nginx 不通。
+原因是 **nginx 的 `resolver` / Go 的 `net.Resolver` 都是纯 DNS 客户端，把主机名原样（带尾点）发给
+DNS 服务器**，不会像 glibc / musl 的 `getaddrinfo` 那样按 `/etc/resolv.conf` 的 `search` 域逐个补全。
+所以 `nslookup` 能通（libc 帮你补了 `instantbox.svc.cluster.local`），反代不通。
 
-> 排查时特别容易误判：`getent hosts <短名>` 成功并不代表 nginx 能解析，两者走的是不同代码路径。
+> 排查时特别容易误判：`getent hosts <短名>` 成功并不代表反代能解析，两者走的是完全不同的代码路径。
+> **换到 Caddy 之后这个坑依然存在**，因为 Go 的 resolver 行为一模一样。
 
-正确写法：`proxy_pass` 的主机名给**全名**。
+正确写法：upstream 给**全名**。
 
-```nginx
-set $console_upstream http://$pod_name.instantbox.svc.cluster.local:1588;
+```caddyfile
+reverse_proxy {re.console.1}.instantbox.svc.cluster.local:1588
 ```
 
-### 13. `resolver` 的地址不能用集群域名
+### 13. nginx 的 `resolver` 地址不能用集群域名（仅 nginx）
 
 顺手写 `resolver kube-dns.kube-system.svc.cluster.local` 看着很优雅，但那是**要解析的域名**，
 而 resolver 本身就是用来做解析的——鸡生蛋。实测直接解析失败，必须给 IP：
@@ -498,6 +572,9 @@ set $console_upstream http://$pod_name.instantbox.svc.cluster.local:1588;
 ```nginx
 resolver 10.43.0.10 valid=10s ipv6=off;     # k3s 默认；kubeadm 一般 10.96.0.10
 ```
+
+Caddy 不需要这行：它读 `/etc/resolv.conf`（Pod 里就是 CoreDNS 的 ClusterIP），没有任何配置项要填。
+这也是换 Caddy 之后少掉的一个坑。
 
 ### 14. 裸 Pod 没有 A 记录，要配同名 headless Service
 
