@@ -276,18 +276,6 @@ spec:
       port: 80
       targetPort: 8080
       nodePort: 30888
-kind: Service
-metadata:
-  name: instantbox
-  namespace: instantbox
-spec:
-  type: NodePort
-  selector: {app: instantbox-frontend}
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-      nodePort: 30888
 ---
 # ---------------------------------------------------------------- 过期回收
 apiVersion: batch/v1
