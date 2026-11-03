@@ -33,15 +33,38 @@ assert 'volumes' not in spec, 'server 不应挂载 docker.sock'
 assert not any('docker.sock' in str(v) for v in spec.get('volumes', []))
 print('[ok] server: 用 SA 令牌，无 docker.sock 挂载')
 
-fe = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'frontend'][0]
+def get_dep(name):
+    found = [d for d in docs if d['kind'] == 'Deployment'
+             and d['metadata']['name'] == name]
+    assert found, 'Deployment {} 不存在'.format(name)
+    return found[0]
+
+
+# 对外入口必须是 gateway（Caddy），不是纯静态的 frontend-web
+gw = get_dep('gateway')
+gw_spec = gw['spec']['template']['spec']
+assert gw_spec['automountServiceAccountToken'] is False
+assert gw_spec['containers'][0]['image'].endswith('instantbox-gateway:latest'), \
+    'gateway 必须用 instantbox-gateway 镜像'
+print('[ok] gateway: Caddy 反代，不挂 SA token')
+
+fe = get_dep('frontend-web')
 assert fe['spec']['template']['spec']['automountServiceAccountToken'] is False
-print('[ok] frontend: 不挂 SA token')
+print('[ok] frontend-web: 纯静态，不挂 SA token')
+
+# 对外 NodePort Service 必须指向 gateway
+ext = [d for d in docs if d['kind'] == 'Service'
+       and d['metadata']['name'] == 'instantbox'][0]
+assert ext['spec']['selector'] == {'app': 'instantbox-gateway'}, \
+    '对外入口 selector 必须指向 gateway'
+assert ext['spec']['ports'][0]['nodePort'] == 30888
+print('[ok] 对外入口 NodePort 30888 -> gateway')
 
 role = [d for d in docs if d['kind'] == 'Role'][0]
 rules = {tuple(r['resources']): r['verbs'] for r in role['rules']}
 pod_verbs = rules[('pods',)]
 assert {'create', 'delete', 'get', 'list', 'patch'} <= set(pod_verbs)
-# 每个沙箱要配同名 headless Service，nginx 才能按 Pod 名解析
+# 每个沙箱要配同名 headless Service，反代才能按 Pod 名解析
 svc_verbs = rules[('services',)]
 assert {'create', 'delete', 'get', 'list'} <= set(svc_verbs)
 print('[ok] Role pods={} services={}'.format(pod_verbs, svc_verbs))

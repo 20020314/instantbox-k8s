@@ -2,7 +2,8 @@
 .*
 !src/**/*
 !public/**/*
-!nginx-main.conf
-!default.conf
 !package*.json
 !patch-sass-loader.js
+# 两个 target 各自的配置文件
+!Caddyfile
+!nginx-web.conf
