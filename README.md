@@ -88,12 +88,15 @@ instantbox-k8s/
 2. `frontend-build` —— `npm ci` → 打 sass-loader 补丁 → babel 语法检查 → **真实 `npm run build`**
 3. `build-server` / `build-frontend` —— 依赖上面两个 job 通过后，用 buildx 构建并推到 **ghcr.io**
 
-镜像地址（构建产物固定打三个 tag：`main` / `latest` / `sha-<7位commit>`）：
+镜像地址（构建产物固定打三个 tag：`main` / `latest` / `sha-<7位commit>`，**同时支持 amd64 与 arm64**）：
 
 ```
 ghcr.io/20020314/instantbox-server:latest    # 或 :main / :sha-xxxxxxx
 ghcr.io/20020314/instantbox-frontend:latest
 ```
+
+> arm64 是必需的：目标集群是 NVIDIA Spark（GB10, arm64）。单架构镜像在 arm64 节点上会
+> `ErrImagePull: no match for platform in manifest`。
 
 两个 package 的可见性已是 **public**，集群无需 imagePullSecret 即可直拉；
 换成自己的 fork 时，确认 package 是 public，否则给 `instantbox` namespace 配 imagePullSecret。

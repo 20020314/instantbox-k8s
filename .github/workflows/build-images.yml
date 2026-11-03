@@ -124,6 +124,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: ./server
+          # 目标集群是 arm64（NVIDIA Spark / GB10），同时保留 amd64 兼容 x86 集群
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -160,6 +162,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: ./frontend
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
