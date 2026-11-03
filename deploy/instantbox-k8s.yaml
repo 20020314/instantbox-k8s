@@ -72,7 +72,11 @@ data:
   INSTANTBOX_CONSOLE_PORT: ""
   # 内网 harbor 代理前缀，例如 harbor.local/dockerhub/，留空则直连 docker.io
   INSTANTBOX_IMAGE_PREFIX: ""
-  INSTANTBOX_IMAGE_PULL_POLICY: "IfNotPresent"
+  # 沙箱镜像 tag 是 :latest，配 IfNotPresent 时节点上有旧缓存就永远不更新
+  # （改完沙箱 Dockerfile 重建镜像，新建的沙箱跑的还是老镜像，极难发现）。
+  # 实测踩过一次，所以这里跟 server/frontend 一样用 Always。
+  # 想省拉取开销：把 manifest 里的 osCode 改成不可变 tag（:sha-xxxxxxx）再回 IfNotPresent。
+  INSTANTBOX_IMAGE_PULL_POLICY: "Always"
   # 空闲多少秒没访问就回收，0 = 只按 TTL 回收
   INSTANTBOX_IDLE_TIMEOUT: "0"
   INSTANTBOX_MAX_CPU_MILLI: "4000"

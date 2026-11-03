@@ -18,7 +18,7 @@ no match for platform in manifest: not found
 | 约定 | 值 |
 |---|---|
 | 监听端口 | `1588` |
-| 入口 | `ttyd -p 1588 bash` |
+| 入口 | `ttyd -p 1588 -W bash`（`-W` 不能省，见主 README §6.2） |
 | 用户 | root（沙箱是一次性的，靠 TTL 回收） |
 | 工作目录 | `/home` |
 

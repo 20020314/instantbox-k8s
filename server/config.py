@@ -46,7 +46,8 @@ SANDBOX_COMMAND = os.environ.get('INSTANTBOX_SANDBOX_COMMAND', '').strip()
 IMAGE_REGISTRY_PREFIX = os.environ.get('INSTANTBOX_IMAGE_PREFIX', '')
 
 # 拉不了镜像时不要卡在 ImagePullBackOff
-IMAGE_PULL_POLICY = os.environ.get('INSTANTBOX_IMAGE_PULL_POLICY', 'IfNotPresent')
+# 默认 Always：manifest 里的 osCode 都是 :latest，配 IfNotPresent 时节点有缓存就不更新
+IMAGE_PULL_POLICY = os.environ.get('INSTANTBOX_IMAGE_PULL_POLICY', 'Always')
 
 # 清理器：pod 上留 lastSeen 时间戳，超过多少秒没被访问就回收（0 = 关闭）
 IDLE_TIMEOUT = _int('INSTANTBOX_IDLE_TIMEOUT', 0)

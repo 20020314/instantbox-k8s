@@ -27,7 +27,7 @@
                     │ server (flask)  │   │ 沙箱 Pod                │
                     │ SA: instantbox- │   │ instantbox-managed-xxx  │
                     │     server      │   │ image: instantbox/ubuntu│
-                    │ ↓ k8s API       │   │ cmd:   ttyd -p 1588 bash│
+                    │ ↓ k8s API       │   │ cmd: ttyd -p 1588 -W bash│
                     │ create/delete   │   └────────────────────────┘
                     │ Pod             │
                     └────────┬────────┘
@@ -120,6 +120,7 @@ docker build -t instantbox-frontend:latest ./frontend \
 | `INSTANTBOX_POD_NAMESPACE` | 沙箱 Pod 的 namespace（默认与 server 相同；不同则 Role 要建在目标 namespace） |
 | `INSTANTBOX_PREFIX` | Pod 名前缀，默认 `instantbox-managed-` |
 | `INSTANTBOX_TTYD_PORT` | 沙箱内 ttyd 端口，官方镜像是 **1588** |
+| `INSTANTBOX_SANDBOX_COMMAND` | 覆盖沙箱容器启动命令，留空用镜像 `CMD`。用不带 `-W` 的旧镜像时填 `ttyd -p 1588 -W bash`（见 §6.2） |
 | `INSTANTBOX_CONSOLE_DOMAIN` | 留空则前端走同域 `/console/<pod>`（推荐：不用配泛域名） |
 | `INSTANTBOX_IMAGE_PREFIX` | 内网仓库代理前缀，如 `harbor.local/dockerhub/` |
 | `INSTANTBOX_MAX_CPU_MILLI` / `MAX_MEM_MB` | 单沙箱上限 |
@@ -312,7 +313,7 @@ spec:
 
 ### 5. 沙箱隔离：默认是**无隔离**的
 
-`instantbox/ubuntu` 这类镜像的 `CMD` 是 `ttyd -p 1588 bash`，容器内是 **root**、且默认
+`instantbox/ubuntu` 这类镜像的 `CMD` 是 `ttyd -p 1588 -W bash`（本项目的沙箱镜像；上游原版没有 `-W`，见 §6.2），容器内是 **root**、且默认
 `securityContext` 全是开放的。给不信任的人用，务必二选一：
 
 ```yaml
@@ -355,6 +356,47 @@ INSTANTBOX_IMAGE_PREFIX: "harbor.local/dockerhub/"    # harbor 的 dockerhub 代
 在 arm64 节点上是 `exec format error`。所以 `sandbox/` 里自己做了多架构镜像
 （`ttyd` 按 `TARGETARCH` 下 x86_64 / aarch64）并推到 ghcr，`server/manifest.json` 只列 CI 真构建过的 5 个。
 加新发行版 = 改 `sandbox/gen_manifest.py` 的 `GROUPS` + workflow 的 `matrix`，两处要一致。
+
+### 6.2 ttyd 必须加 `-W`，否则「终端能打开、打不了字」
+
+这是整个移植过程中最费时间的一个坑，现象很有迷惑性：
+
+- `/console/<pod>/` 返回 **200**，ttyd 页面正常加载
+- WebSocket 握手 **101**，`Sec-WebSocket-Protocol: tty` 协商成功
+- 终端里能刷出 `1bash (pod-name)`、窗口标题、以及 `root@pod:/home# ` 提示符
+- **但敲任何键都没有反应**，前端根本不回显
+
+实测各种可能原因（同镜像、同一段裸 WebSocket 脚本逐个对照）：
+
+| 变量 | 结果 |
+|---|---|
+| `ttyd -p 1588 bash` | 输入无回显 ❌ |
+| `ttyd -p 1588 -d 7 bash` | 输入无回显 ❌ |
+| **`ttyd -p 1588 -W bash`** | **回显 `WORLD_OK` ✅** |
+| 容器 `tty: true` / `stdin: true` | 无关 |
+| ttyd 是 PID 1 / 通过 `sh -c` / `exec` / `setsid` | 无关 |
+| 直连 Pod IP vs 经 nginx 反代 | **完全一致**，与反代无关 |
+
+根因就一句 `ttyd --help` 里的说明：
+
+```
+-W, --writable          Allow clients to write to the TTY (readonly by default)
+```
+
+ttyd **默认客户端只读**——它照样把服务端输出推给你，但客户端发过来的 `'0'+keys` 帧会被丢弃。
+所以「能看不能打」不是 bug，是默认配置。
+
+本项目 `sandbox/Dockerfile` 的 `CMD` 已经是 `["ttyd", "-p", "1588", "-W", "bash"]`。
+如果换成上游 `instantbox/*` 镜像（同样是 `ttyd -p 1588 bash`，同样没有 `-W`），
+要么改镜像，要么设一个环境变量强制覆盖容器启动命令：
+
+```yaml
+env:
+  - { name: INSTANTBOX_SANDBOX_COMMAND, value: "ttyd -p 1588 -W bash" }
+```
+
+> 排查建议：别急着怀疑 nginx / Service / 网络。先用裸 WebSocket（`Sec-WebSocket-Protocol: tty`）
+> 直连 Pod IP，发一帧 `'0' + 'echo X\r'`，看有没有回显——有回显说明链路全通，没回显就是 ttyd 侧的事。
 
 ### 7. 前端路由的历史包袱
 
