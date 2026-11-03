@@ -1,0 +1,10 @@
+# Windows 下提交，容器内是 Linux，必须统一成 LF
+* text=auto eol=lf
+*.sh text eol=lf
+*.conf text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.ico binary

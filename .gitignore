@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# 构建产物
+frontend/build/
+dist/
+
+# 本地环境
+.env
+.env.local
+kubeconfig
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

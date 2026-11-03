@@ -1,0 +1,169 @@
+name: build-images
+
+# 推 tag / 手动触发。镜像推到 GitHub Container Registry（ghcr.io），
+# 用内置的 GITHUB_TOKEN，不需要另配 secret。
+#
+# 想推 Docker Hub：在仓库 Secrets 里加 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，
+# 然后把 REGISTRY 改成 docker.io/<你的用户名>。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'server/**'
+      - 'frontend/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'frontend/**'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # 后端单测：用假 client，不连集群；顺带离线校验 k8s 清单
+  server-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install deps
+        working-directory: server
+        run: pip install -r requirements.txt pytest pyyaml
+      - name: Unit tests
+        working-directory: server
+        run: pytest test_manager.py -q
+      - name: Validate k8s manifest offline
+        working-directory: deploy
+        run: python validate_manifest.py ./instantbox-k8s.yaml
+
+  # 前端：装依赖 + 语法检查 + 真实构建（验证改动真的能编译）
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        working-directory: frontend
+        env:
+          npm_config_registry: https://registry.npmmirror.com
+        run: |
+          # node-sass 在 linux 上能装预编译包；装不上也没关系（optional）
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: Map sass-loader to dart-sass
+        working-directory: frontend
+        run: node patch-sass-loader.js
+      - name: Syntax check (babel parser)
+        working-directory: frontend
+        run: |
+          node -e '
+          const parser = require("@babel/parser");
+          const fs = require("fs"), path = require("path");
+          const walk = d => fs.readdirSync(d, {withFileTypes: true}).flatMap(e => {
+            const p = path.join(d, e.name);
+            return e.isDirectory() ? walk(p) : (p.endsWith(".js") ? [p] : []);
+          });
+          let bad = 0;
+          for (const f of walk("src")) {
+            try {
+              parser.parse(fs.readFileSync(f, "utf8"), {
+                sourceType: "module", plugins: ["jsx", "classProperties", "classPrivateProperties"]
+              });
+            } catch (e) { console.error("SYNTAX", f, e.message); bad++; }
+          }
+          if (bad) process.exit(1);
+          console.log("all js files parse OK");
+          '
+      - name: Production build
+        working-directory: frontend
+        env:
+          CI: 'false'
+          NODE_OPTIONS: '--openssl-legacy-provider'
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build
+          retention-days: 3
+
+  build-server:
+    needs: [server-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/instantbox-server
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+  build-frontend:
+    needs: [frontend-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/instantbox-frontend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NPM_REGISTRY=https://registry.npmmirror.com
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend

@@ -1,0 +1,8 @@
+*
+.*
+!src/**/*
+!public/**/*
+!nginx-main.conf
+!default.conf
+!package*.json
+!patch-sass-loader.js

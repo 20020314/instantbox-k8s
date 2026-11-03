@@ -1,0 +1,49 @@
+"""离线校验 deploy/instantbox-k8s.yaml：用 k8s python 客户端反序列化成模型，字段名写错会直接报错。"""
+import sys
+
+import json
+
+import yaml
+from kubernetes.client import ApiClient
+from kubernetes.client.models import (
+    V1Namespace, V1ServiceAccount, V1Role, V1RoleBinding, V1ConfigMap,
+    V1Deployment, V1Service, V1CronJob,
+)
+
+KIND_MAP = {
+    'Namespace': V1Namespace, 'ServiceAccount': V1ServiceAccount,
+    'Role': V1Role, 'RoleBinding': V1RoleBinding, 'ConfigMap': V1ConfigMap,
+    'Deployment': V1Deployment, 'Service': V1Service, 'CronJob': V1CronJob,
+}
+
+MANIFEST = sys.argv[1] if len(sys.argv) > 1 else '../deploy/instantbox-k8s.yaml'
+
+api = ApiClient()
+docs = [d for d in yaml.safe_load_all(open(MANIFEST, encoding='utf-8')) if d]
+for d in docs:
+    kind = d['kind']
+    obj = api.deserialize(json.dumps(d), KIND_MAP[kind], 'application/json')
+    print('{:<15} {:<22} -> {}'.format(kind, d['metadata']['name'], type(obj).__name__))
+
+dep = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'server'][0]
+spec = dep['spec']['template']['spec']
+assert spec['serviceAccountName'] == 'instantbox-server'
+assert spec['automountServiceAccountToken'] is True
+assert 'volumes' not in spec, 'server 不应挂载 docker.sock'
+assert not any('docker.sock' in str(v) for v in spec.get('volumes', []))
+print('[ok] server: 用 SA 令牌，无 docker.sock 挂载')
+
+fe = [d for d in docs if d['kind'] == 'Deployment' and d['metadata']['name'] == 'frontend'][0]
+assert fe['spec']['template']['spec']['automountServiceAccountToken'] is False
+print('[ok] frontend: 不挂 SA token')
+
+role = [d for d in docs if d['kind'] == 'Role'][0]
+verbs = role['rules'][0]['verbs']
+assert {'create', 'delete', 'get', 'list', 'patch'} <= set(verbs)
+assert role['rules'][0]['resources'] == ['pods']
+print('[ok] Role verbs={} resources={}'.format(verbs, role['rules'][0]['resources']))
+
+cm = [d for d in docs if d['kind'] == 'ConfigMap'][0]['data']
+assert cm['INSTANTBOX_POD_NAMESPACE'] == 'instantbox'
+print('[ok] ConfigMap {} 项'.format(len(cm)))
+print('ALL OK')
