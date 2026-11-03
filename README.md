@@ -88,16 +88,17 @@ instantbox-k8s/
 2. `frontend-build` —— `npm ci` → 打 sass-loader 补丁 → babel 语法检查 → **真实 `npm run build`**
 3. `build-server` / `build-frontend` —— 依赖上面两个 job 通过后，用 buildx 构建并推到 **ghcr.io**
 
-镜像地址：
+镜像地址（构建产物固定打三个 tag：`main` / `latest` / `sha-<7位commit>`）：
 
 ```
-ghcr.io/<你的用户名>/instantbox-server:latest    # 或 :v1.0.0 / :sha-xxxxx
-ghcr.io/<你的用户名>/instantbox-frontend:latest
+ghcr.io/20020314/instantbox-server:latest    # 或 :main / :sha-xxxxxxx
+ghcr.io/20020314/instantbox-frontend:latest
 ```
 
-> 私有仓库首次推完，记得把 package 可见性改成 public，或者给集群配 imagePullSecret。
+两个 package 的可见性已是 **public**，集群无需 imagePullSecret 即可直拉；
+换成自己的 fork 时，确认 package 是 public，否则给 `instantbox` namespace 配 imagePullSecret。
 
-本地手工构建（需要 docker，且网络能装 node-sass 的预编译包）：
+本地手工构建（**可选**；CI 已经全包，本机不需要装 node / python / docker）：
 
 ```bash
 docker build -t instantbox-server:latest ./server \

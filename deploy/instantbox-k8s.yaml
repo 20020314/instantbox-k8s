@@ -98,7 +98,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: server
-          image: instantbox-server:latest
+          image: ghcr.io/20020314/instantbox-server:latest
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef: {name: instantbox-config}
@@ -154,7 +154,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: nginx
-          image: instantbox-frontend:latest
+          image: ghcr.io/20020314/instantbox-frontend:latest
           imagePullPolicy: IfNotPresent
           ports:
             - {name: http, containerPort: 8080}
