@@ -273,6 +273,13 @@ describe('安全', () => {
     }
   })
 
+  test('★ /console/<pod> 不带斜杠时 301 补斜杠（否则 ttyd 的 ws 会丢前缀）', async () => {
+    // 不跟随重定向，直接看响应头
+    const r = await fetch(`${base}/console/instantbox-managed-abc123`, { redirect: 'manual' })
+    expect(r.status).toBe(301)
+    expect(r.headers.get('location')).toBe('/console/instantbox-managed-abc123/')
+  })
+
   test('静态资源目录穿越被拒', async () => {
     // fetch 会把 ../ 规范化掉，所以用百分号编码和反斜杠两种绕过手法
     for (const p of ['/%2e%2e/package.json', '/..%2fpackage.json', '/%2e%2e%2fmanifest.json']) {
@@ -317,5 +324,53 @@ describe('/created 的待启动标记', () => {
     // 关键：不能被当成失败（bug 就是这个：Pod 建好了但显示失败）
     expect(html).not.toContain('class="err-banner"')
     expect(html).toContain('/console/instantbox-managed-abc123/')
+  })
+})
+
+// ---------------------------------------------------------------- 异步创建
+describe('异步创建：点确定立刻返回进度页', () => {
+  test('/creating 是进度页：有转圈、有轮询脚本、没有建 Pod 的表单', async () => {
+    const r = await fetch(`${base}/creating?lang=zh&id=instantbox-managed-abc123&os=x&cpu=1&mem=512&ttl=1`)
+    const html = await r.text()
+    expect(r.status).toBe(200)
+    expect(html).toContain('class="spinner"')
+    expect(html).toContain('class="creating-title"')
+    // 轮询脚本必须指向 /api/job/
+    expect(html).toContain('/api/job/')
+    // 进度页不该再出现「创建」按钮（否则用户会重复点）
+    expect(html).not.toContain('name="confirm" value="1"')
+  })
+
+  test('进度页不会渲染向导（避免用户以为还能改配置）', async () => {
+    const r = await fetch(`${base}/creating?lang=zh&id=instantbox-managed-abc123`)
+    const html = await r.text()
+    expect(html).not.toContain('class="ant-steps"')
+    expect(html).not.toContain('class="os-card')
+  })
+
+  test('/api/job/<id> 拒绝非法 id（防 SSRF / 越权查别的 Pod）', async () => {
+    // 注意：不能直接写 `../../etc/passwd` —— fetch 会在发请求前把路径规范化掉，
+    // 变成 /api/etc/passwd，压根到不了 job 路由。用编码形式才是真实攻击面。
+    const bad = await fetch(`${base}/api/job/${encodeURIComponent('../../etc/passwd')}`)
+    expect(bad.status).toBe(400)
+
+    const bad2 = await fetch(`${base}/api/job/some-other-pod`)
+    expect(bad2.status).toBe(400)
+
+    // 带点 / 斜杠 / 空格的名字也得挡住
+    for (const evil of ['a.b', 'a/b', 'a b']) {
+      const r = await fetch(`${base}/api/job/${encodeURIComponent(evil)}`)
+      expect(r.status).toBe(400)
+    }
+  })
+
+  test('/api/job/<id> 对不存在的 Pod 返回 failed，而不是 500', async () => {
+    const r = await fetch(`${base}/api/job/instantbox-managed-notexist`)
+    const j = (await r.json()) as any
+    expect(r.status).toBe(200)
+    expect(j.phase).toBe('failed')
+    // 必须带 query，前端才能跳 /created
+    expect(typeof j.query).toBe('string')
+    expect(j.query).toContain('id=instantbox-managed-notexist')
   })
 })

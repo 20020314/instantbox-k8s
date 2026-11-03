@@ -43,6 +43,16 @@ export interface PageState {
   step?: 0 | 1
   /** 第二步点了 Create，正在弹确认框（原版的 modalVisible） */
   confirm?: boolean
+  /**
+   * 正在等待系统启动（点了确定、Pod 已建但 ttyd 还没应答）。
+   *
+   * 这一页会带自动轮询脚本：每 1.5s 查 /api/job/<id>，
+   * 状态变了就改文案，就绪就跳结果页。见 index.ts 的 handleCreating。
+   */
+  creating?: {
+    podPhase: string
+    shellReady: boolean
+  }
 }
 
 // ---------------------------------------------------------------- 样式
@@ -230,6 +240,16 @@ a:hover{color:#40a9ff}
 .notice-line{text-align:center;color:rgba(0,0,0,.45);font-size:13px;margin:8px 0 0}
 .spin-text{text-align:center;color:#1890ff;font-size:13px;margin:0 0 12px}
 
+/* ---------- 等待系统启动（点了确定之后） ---------- */
+.creating-box{display:flex;flex-direction:column;align-items:center;
+  justify-content:center;min-height:280px;padding:20px 0}
+.spinner{width:40px;height:40px;border:3px solid #f0f0f0;border-top-color:#1890ff;
+  border-radius:50%;animation:ib-spin .9s linear infinite}
+@keyframes ib-spin{to{transform:rotate(360deg)}}
+.creating-title{margin:20px 0 6px;font-size:16px;color:rgba(0,0,0,.85)}
+.creating-phase{margin:0;font-size:13px;color:rgba(0,0,0,.45)}
+.creating-elapsed{margin:4px 0 0;font-size:12px;color:rgba(0,0,0,.35)}
+
 /* ---------- antd Modal ---------- */
 .mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;
   align-items:flex-start;justify-content:center;padding-top:100px;z-index:1000}
@@ -347,7 +367,11 @@ function OsCards({
             <div class="os-card-name">{o.label}</div>
             <img
               className={active ? 'isSelect' : ''}
-              src={osIconDataUrl(o.value, o.label)}
+              // 原版就是 <img src={item.logoUrl}>，logoUrl 指向
+              // cdn.jsdelivr.net/gh/instantbox/instantbox-images/icon/<name>.png。
+              // manifest 里没填（或填了但断网拉不到）时，src 挂真实 PNG 的内联
+              // 副本兜底；再认不出的发行版才用 SVG 字母块，避免破图。
+              src={o.logoUrl || osIconDataUrl(o.value, o.label)}
               alt={o.label}
             />
             <div class="ant-select">
@@ -518,6 +542,97 @@ function ConfirmModal({ state }: { state: PageState }) {
   )
 }
 
+/**
+ * 等待页：点了「确定」到系统真能开 shell 之间。
+ *
+ * ★ 为什么不在这里阻塞渲染：拉镜像 + 起 ttyd 要 20~90 秒。
+ *   在服务端 await 会让浏览器转圈几十秒、还可能被网关掐断。
+ *   所以页面立刻返回，靠下面这段轮询脚本自己推进。
+ *
+ * 轮询目标 /api/job/<id> 返回：
+ *   { phase: 'pending'|'ready'|'timeout'|'failed', podPhase, shellReady, ... }
+ *   * pending → 改文案继续等（区分「调度中」「拉镜像」「起容器」）
+ *   * ready   → location 跳 /created
+ *   * timeout → 跳到 /created?pending=1（Pod 还在，给按钮让用户自己重试）
+ *   * failed  → 跳到 /created?...&failed=1 或直接显示错误
+ */
+function CreatingView({ state }: { state: PageState }) {
+  const t = strings[state.locale]
+  const c = state.creating
+  const podPhase = c?.podPhase ?? 'Pending'
+
+  // Pod phase 翻译成人话，比裸的 Pending/Running 有用得多
+  const phaseText =
+    podPhase === 'Pending'
+      ? t.sentence['os-starting']
+      : podPhase === 'Running'
+        ? t.prompt['os-starting']
+        : podPhase
+  const id = state.containerId ?? ''
+
+  return (
+    <div class="select-system-config">
+      <div class="creating-box">
+        <div class="spinner" />
+        <p class="creating-title">{t.prompt['os-starting']}</p>
+        <p class="creating-phase" id="ib-phase">
+          {phaseText}
+        </p>
+        <p class="creating-elapsed" id="ib-elapsed">
+          0s
+        </p>
+      </div>
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+(function(){
+  var id=${JSON.stringify(id)};
+  var lang=${JSON.stringify(state.locale)};
+  if(!id) return;
+  var t0=Date.now(), el=document.getElementById('ib-elapsed'),
+      ph=document.getElementById('ib-phase'), tries=0;
+  var texts=${JSON.stringify({
+    pending: t.sentence['os-starting'],
+    running: t.prompt['os-starting'],
+  })};
+  function tick(){
+    if(el) el.textContent=Math.round((Date.now()-t0)/1000)+'s';
+  }
+  tick(); var timer=setInterval(tick,1000);
+  function poll(){
+    tries++;
+    if(tries>240){ clearInterval(timer); location.reload(); return; }
+    fetch('/api/job/'+encodeURIComponent(id),{headers:{accept:'application/json'}})
+      .then(function(r){return r.json()})
+      .then(function(j){
+        if(j.phase==='ready'){
+          clearInterval(timer);
+          // 已经能连 shell 了：直接进终端，不用再绕一次结果页点「打开系统」
+          location.replace(j.shellUrl || ('/created?'+j.query));
+          return;
+        }
+        if(j.phase==='failed'||j.phase==='timeout'){
+          clearInterval(timer);
+          location.replace('/created?'+j.query);
+          return;
+        }
+        // 还在等：更新阶段文案
+        if(ph){
+          ph.textContent = (j.podPhase==='Running')?texts.running:texts.pending;
+        }
+        setTimeout(poll,1500);
+      })
+      .catch(function(){ setTimeout(poll,3000) });
+  }
+  setTimeout(poll,800);
+})();
+`,
+        }}
+      />
+    </div>
+  )
+}
+
 /** 结果页（原版 isExistContainer 为 true 的分支） */
 function ResultView({ state }: { state: PageState }) {
   const t = strings[state.locale]
@@ -587,12 +702,20 @@ export function renderPage(state: PageState) {
           <LangSwitcher locale={state.locale} />
 
           <div class="ant-divider plain">
-            <span>{created ? t.prompt['created-os'] : t.prompt['select-os']}</span>
+            <span>
+              {state.creating
+                ? t.prompt['os-starting']
+                : created
+                  ? t.prompt['created-os']
+                  : t.prompt['select-os']}
+            </span>
           </div>
 
           {state.error ? <div class="err-banner">{state.error}</div> : null}
 
-          {created ? (
+          {state.creating ? (
+            <CreatingView state={state} />
+          ) : created ? (
             <ResultView state={state} />
           ) : (
             <>

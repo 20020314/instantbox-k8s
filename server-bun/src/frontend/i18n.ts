@@ -60,6 +60,8 @@ interface Dict {
     'err-ttl-in-hours': string
     'msg-ttl-in-hours': string
     'err-empty-os': string
+    /** 超时：Pod 还在（多半在拉镜像），不算失败 */
+    'err-timeout': string
   }
 }
 
@@ -117,6 +119,7 @@ export const strings: Record<Locale, Dict> = {
       'err-ttl-in-hours': '使用时长格式或范围有误',
       'msg-ttl-in-hours': '使用时长范围：1 ~ 24',
       'err-empty-os': '请先选择系统和系统版本',
+      'err-timeout': '镜像拉取较慢，系统还在启动中。已为你保留这台系统，可以稍后点「打开系统」重试。',
     },
   },
 
@@ -173,6 +176,7 @@ export const strings: Record<Locale, Dict> = {
       'err-ttl-in-hours': '使用時間格式或範圍錯誤',
       'msg-ttl-in-hours': '使用時間範圍：1 ~ 24',
       'err-empty-os': '請先選擇系統和系統版本',
+      'err-timeout': '映像檔拉取較慢，系統還在啟動中。已為你保留這台系統，可以稍後點「開啟系統」重試。',
     },
   },
 
@@ -231,6 +235,8 @@ export const strings: Record<Locale, Dict> = {
       'err-ttl-in-hours': 'Failed to validate duration',
       'msg-ttl-in-hours': 'Duration range: 1-24',
       'err-empty-os': 'Please choose an OS.',
+      'err-timeout':
+        'The image is taking a while to pull and your instantbox is still starting. It has been kept for you — try "Open" again in a moment.',
     },
   },
 
@@ -289,6 +295,8 @@ export const strings: Record<Locale, Dict> = {
       'err-ttl-in-hours': 'Echec de la validation de la durée',
       'msg-ttl-in-hours': 'Plage durée: 1-24',
       'err-empty-os': 'Veuillez choisir un OS.',
+      'err-timeout':
+        "L'image met du temps à être récupérée et votre instantbox démarre encore. Elle a été conservée — réessayez « Ouvrir » dans un instant.",
     },
   },
 }

@@ -66,9 +66,17 @@ export function nodeSelector(): Record<string, string> | undefined {
   return Object.keys(out).length ? out : undefined
 }
 
-/** 沙箱控制台地址 */
+/**
+ * 沙箱控制台地址。
+ *
+ * ★ 相对路径分支必须带尾部斜杠。
+ *   `/console/<pod>` 少了那个 `/`，浏览器会把页面里的相对路径（ttyd 用
+ *   `ws` / `token` 这类相对地址去建 WebSocket）解析成 `/console/ws`，
+ *   于是网关按「pod 名 = ws」处理 → 404，终端永远连不上。
+ *   带斜杠后 `/console/<pod>/` + `ws` = `/console/<pod>/ws`，正好落在反代路由上。
+ */
 export function shareUrl(containerName: string): string {
-  if (!cfg.CONSOLE_DOMAIN) return `/console/${containerName}`
+  if (!cfg.CONSOLE_DOMAIN) return `/console/${containerName}/`
   const host =
     cfg.CONSOLE_PORT && cfg.CONSOLE_PORT !== '80' && cfg.CONSOLE_PORT !== '443'
       ? `${containerName}.${cfg.CONSOLE_DOMAIN}:${cfg.CONSOLE_PORT}`

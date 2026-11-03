@@ -286,11 +286,105 @@ describe('TTL 回收', () => {
   })
 })
 
+describe('shell 就绪探测', () => {
+  /** 造一个处于指定 phase 的 Pod */
+  function podAt(phase: string, ready = false) {
+    return {
+      metadata: { name: 'x' },
+      status: { phase, containerStatuses: [{ ready }] },
+    }
+  }
+
+  test('status 会把 containerStatuses.ready 带出来（原来只有 phase）', async () => {
+    const fake = new FakeK8s()
+    fake.pods.set('p1', podAt('Running', true))
+    const st = await mgr(fake).status('p1')
+    expect(st?.phase).toBe('Running')
+    expect(st?.ready).toBe(true)
+  })
+
+  test('shellUrl 走 headless Service 的集群内 DNS，端口是 TTYD_PORT', () => {
+    const url = mgr(new FakeK8s()).shellUrl('instantbox-managed-abcdef123456')
+    expect(url).toContain('.svc.cluster.local')
+    expect(url.startsWith('http://')).toBe(true)
+  })
+
+  test('Pod 进 Failed 立刻判失败，不傻等到超时', async () => {
+    const fake = new FakeK8s()
+    fake.pods.set('p1', podAt('Failed'))
+    const t0 = Date.now()
+    const r = await mgr(fake).waitUntilShellReady('p1', { timeoutMs: 30_000, pollMs: 10 })
+    expect(r).toBe('failed')
+    expect(Date.now() - t0).toBeLessThan(2000)
+  })
+
+  test('Pod 查不到（已被回收）判失败', async () => {
+    const r = await mgr(new FakeK8s()).waitUntilShellReady('ghost', {
+      timeoutMs: 5000,
+      pollMs: 10,
+    })
+    expect(r).toBe('failed')
+  })
+
+  test('★ Running 但 ttyd 连不上 → 不能算 ready，会一直等到超时', async () => {
+    // 这正是「点了确定立刻响应，但打开 webshell 是白页」的原因：
+    // 容器起来了 ttyd 还没 listen。判定必须看真实探测结果，不能看 phase。
+    //
+    // 注意：这里必须桩掉 shellReady —— 让它真去 fetch `p1.default.svc.cluster.local`
+    // 的话，在开发机上 DNS 可能被解析/parked 而返回 200，测试就不稳定了。
+    const fake = new FakeK8s()
+    fake.pods.set('p1', podAt('Running', true))
+    const m = mgr(fake)
+    let probeCount = 0
+    ;(m as any).shellReady = async () => {
+      probeCount++
+      return false
+    }
+    const t0 = Date.now()
+    const r = await m.waitUntilShellReady('p1', { timeoutMs: 300, pollMs: 50 })
+    expect(r).toBe('timeout')
+    // 确实反复探测了，不是一次就放行
+    expect(probeCount).toBeGreaterThan(2)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(250)
+  })
+
+  test('★ Running 且 ttyd 应答 → ready', async () => {
+    const fake = new FakeK8s()
+    fake.pods.set('p1', podAt('Running', true))
+    const m = mgr(fake)
+    ;(m as any).shellReady = async () => true
+    const r = await m.waitUntilShellReady('p1', { timeoutMs: 5000, pollMs: 10 })
+    expect(r).toBe('ready')
+  })
+
+  test('★ Pending 阶段不去探测 ttyd（别浪费一个 2s 超时）', async () => {
+    const fake = new FakeK8s()
+    fake.pods.set('p1', podAt('Pending'))
+    const m = mgr(fake)
+    let probed = 0
+    ;(m as any).shellReady = async () => {
+      probed++
+      return true
+    }
+    // Pending 一直不变 → 超时；期间一次都不应该探测
+    const r = await m.waitUntilShellReady('p1', { timeoutMs: 200, pollMs: 50 })
+    expect(r).toBe('timeout')
+    expect(probed).toBe(0)
+  })
+})
+
 describe('shareUrl', () => {
   test('没配 CONSOLE_DOMAIN 时返回相对路径（这正是之前跳错地址的 bug）', () => {
     const m = mgr(new FakeK8s())
     const url = m.shareUrl('instantbox-managed-abcdef123456')
-    expect(url).toBe('/console/instantbox-managed-abcdef123456')
     expect(url.startsWith('http://')).toBe(false)
+    expect(url.startsWith('/console/instantbox-managed-abcdef123456')).toBe(true)
+  })
+
+  test('★ 相对路径必须带尾部斜杠', () => {
+    // 少了这个斜杠，ttyd 页面里的相对地址 `ws` 会被解析成 /console/ws，
+    // 网关拿 "ws" 当 pod 名 → 404，终端永远连不上（用户报的「没有前缀」）。
+    const url = mgr(new FakeK8s()).shareUrl('instantbox-managed-abcdef123456')
+    expect(url).toBe('/console/instantbox-managed-abcdef123456/')
   })
 })

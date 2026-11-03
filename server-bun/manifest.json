@@ -2,7 +2,7 @@
   {
     "label": "Ubuntu",
     "value": "ubuntu",
-    "logoUrl": "",
+    "logoUrl": "https://cdn.jsdelivr.net/gh/instantbox/instantbox-images/icon/ubuntu.png",
     "subList": [
       {
         "label": "20.04",
@@ -21,7 +21,7 @@
   {
     "label": "Debian",
     "value": "debian",
-    "logoUrl": "",
+    "logoUrl": "https://cdn.jsdelivr.net/gh/instantbox/instantbox-images/icon/debian.png",
     "subList": [
       {
         "label": "12",
@@ -32,7 +32,7 @@
   {
     "label": "Alpine",
     "value": "alpine",
-    "logoUrl": "",
+    "logoUrl": "https://cdn.jsdelivr.net/gh/instantbox/instantbox-images/icon/alpine.png",
     "subList": [
       {
         "label": "3.20",

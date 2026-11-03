@@ -30,6 +30,8 @@ export interface OsItem {
 export interface PodStatus {
   phase: string
   podIP: string | null
+  /** containerStatuses 里有 ready=true（即 readinessProbe 通过） */
+  ready: boolean
 }
 
 export class SandboxManager {
@@ -189,13 +191,87 @@ export class SandboxManager {
   async status(name: string): Promise<PodStatus | null> {
     try {
       const pod = await this.client.getPod(this.namespace, name)
+      const status = pod.status ?? {}
+      // containerStatuses 里如果有 ready=true，说明 readinessProbe 也通过了
+      const ready = (status.containerStatuses ?? []).some(
+        (c: { ready?: boolean }) => c.ready === true,
+      )
       return {
-        phase: pod.status?.phase ?? 'Unknown',
-        podIP: pod.status?.podIP ?? null,
+        phase: status.phase ?? 'Unknown',
+        podIP: status.podIP ?? null,
+        ready,
       }
     } catch {
       return null
     }
+  }
+
+  /**
+   * 沙箱内 ttyd 的访问地址。
+   *
+   * 用 headless Service 的 DNS 而不是 Pod IP：Service 一建好域名就解析得动，
+   * Pod IP 要等容器网络就绪；而且 IP 变了域名不用跟着改。
+   */
+  shellUrl(name: string): string {
+    return `http://${name}.${this.namespace}.svc.cluster.local:${cfg.TTYD_PORT}/`
+  }
+
+  /**
+   * 探测 shell 到底能不能用 —— **不是 Pod Running 就算数**。
+   *
+   * Running 只说明容器起来了；ttyd 还要几百毫秒到几秒才开始 listen。
+   * 这时候把「打开系统」的按钮放出去，用户点开是个白页 / 502，
+   * 看起来就像创建失败。
+   *
+   * ttyd 的根路径返回一个 HTML 页面（200），所以能拿到 HTTP 响应
+   * 且状态码 < 500 就认为它在服务了。
+   */
+  async shellReady(name: string): Promise<boolean> {
+    try {
+      const res = await fetch(this.shellUrl(name), {
+        // /token 不依赖 WebSocket，轻量且必定实现（ttyd 1.x 都有）
+        signal: AbortSignal.timeout(2000),
+        headers: { accept: 'text/html' },
+      })
+      return res.status < 500
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 一直等到「能开 shell」，返回三态，语义与 index.ts 里的处理一一对应：
+   *   ready   —— 可以放心把地址给用户
+   *   timeout —— Pod 还在（多半在拉镜像），不算失败
+   *   failed  —— Pod 进 Failed / 被删掉了
+   *
+   * @param onPhase 每次状态变化回调一次（给日志用，可选）
+   */
+  async waitUntilShellReady(
+    name: string,
+    opts: { timeoutMs?: number; pollMs?: number; onPhase?: (p: string) => void } = {},
+  ): Promise<'ready' | 'timeout' | 'failed'> {
+    const timeoutMs = opts.timeoutMs ?? 180_000
+    const pollMs = opts.pollMs ?? 1_000
+    const deadline = Date.now() + timeoutMs
+    let lastPhase = ''
+
+    while (Date.now() < deadline) {
+      const st = await this.status(name)
+      if (!st) return 'failed'
+      if (st.phase === 'Failed' || st.phase === 'Succeeded') return 'failed'
+
+      if (st.phase !== lastPhase) {
+        lastPhase = st.phase
+        opts.onPhase?.(st.phase)
+      }
+
+      // 容器 Running 且 ttyd 已经在应答 → 真的可以开 shell 了
+      if (st.phase === 'Running' && (await this.shellReady(name))) return 'ready'
+
+      await Bun.sleep(pollMs)
+    }
+    return 'timeout'
   }
 
   /** 记录最后一次访问时间，供空闲回收使用。失败静默。 */

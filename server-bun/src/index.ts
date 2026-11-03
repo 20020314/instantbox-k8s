@@ -41,6 +41,7 @@ import { join } from 'node:path'
 
 import { cfg } from './config'
 import { getManager } from './sandbox'
+import { resolveJob, startCreateJob } from './jobs'
 import { DEFAULT_LOCALE, fromAcceptLanguage, pickLocale, strings } from './frontend/i18n'
 import { renderToString } from './frontend/jsx-runtime'
 import { renderPage, type PageState } from './frontend/page'
@@ -54,8 +55,12 @@ const MAX_TIMEOUT_AHEAD = 3600 * 24
  * （调度 + 拉镜像 + 起容器，实测首次拉镜像要 20~90s）。原来不管 phase 直接
  * 返回成功，用户点「打开系统」立刻 502，看起来像创建失败——而实际上 Pod
  * 好好地建出来了，只是没就绪。这就是「显示创建失败但其实建了」的根因。
+ *
+ * ★ 而且「Running」还不够：容器起来了 ttyd 还要再等 1~3 秒才 listen。
+ *   所以判定条件真正要看的是「ttyd 已经在应答」，见 SandboxManager.waitUntilShellReady。
+ *   首次拉镜像（几百 MB）确实可能超过 90s，放宽到 180s。
  */
-const READY_TIMEOUT_MS = 90_000
+const READY_TIMEOUT_MS = 180_000
 const READY_POLL_MS = 1_000
 
 const PUBLIC_DIR =
@@ -177,24 +182,22 @@ function validateForm(cpu: string, mem: string, ttl: string, osName: string): st
 }
 
 /**
- * 轮询直到 Pod 进入 Running（或超时/失败）。
+ * 轮询直到「真的能开 shell」。
  *
- * 返回 'running' | 'timeout' | 'failed'。
+ * 别用 Pod phase === 'Running' 当成功信号：那时 ttyd 可能还没 listen，
+ * 用户点「打开系统」就是一个白页。真正的判据是 ttyd 已经在应答 HTTP。
+ *
+ * 返回 'ready' | 'timeout' | 'failed'。
  *   * timeout：调度或拉镜像太慢。Pod 还在，调用方应该告诉用户「稍等一下再点」
  *     而不是「创建失败」——这是两个完全不同的处置。
  *   * failed ：Pod 进入 Failed / 被驱逐，确实是失败。
  */
-async function waitUntilRunning(name: string): Promise<'running' | 'timeout' | 'failed'> {
-  const deadline = Date.now() + READY_TIMEOUT_MS
-  while (Date.now() < deadline) {
-    const st = await getManager().status(name)
-    // status 返回 null = 查不到（已被回收/删除），当作失败
-    if (!st) return 'failed'
-    if (st.phase === 'Running') return 'running'
-    if (st.phase === 'Failed' || st.phase === 'Succeeded') return 'failed'
-    await Bun.sleep(READY_POLL_MS)
-  }
-  return 'timeout'
+async function waitUntilShellReady(name: string): Promise<'ready' | 'timeout' | 'failed'> {
+  return getManager().waitUntilShellReady(name, {
+    timeoutMs: READY_TIMEOUT_MS,
+    pollMs: READY_POLL_MS,
+    onPhase: (p) => console.log(`[create] ${name} phase=${p}`),
+  })
 }
 
 // ---------------------------------------------------------------- 控制面
@@ -203,6 +206,54 @@ async function handleApi(pathname: string, url: URL): Promise<Response> {
   const API = '/v2/superinspire'
 
   if (p === API) return text('instantbox-k8s')
+
+  /**
+   * GET /api/job/<containerId> —— 进度页的轮询接口。
+   *
+   * 返回 current job 状态 + 一个现成的 query string，
+   * 前端就绪/超时/失败时直接 location.replace('/created?'+query)，
+   * 不用在前端拼参数（省得漏字段）。
+   */
+  if (p.startsWith('/job/')) {
+    const id = decodeURIComponent(p.slice('/job/'.length))
+    if (!POD_RE.test(id)) return json({ phase: 'failed', message: 'bad id' }, 400)
+
+    const mgr = getManager()
+    const job = await resolveJob(mgr, id)
+    if (!job) {
+      // Pod 已经没了（被回收 / 从没建出来）
+      return json({
+        phase: 'failed',
+        podPhase: 'Gone',
+        shellReady: false,
+        query: new URLSearchParams({ id, url: '', failed: '1' }).toString(),
+      })
+    }
+
+    const q = new URLSearchParams({
+      lang: job.params.locale || DEFAULT_LOCALE,
+      os: job.params.osName,
+      cpu: job.params.cpu,
+      mem: job.params.mem,
+      ttl: job.params.ttl,
+      id,
+      url: job.params.shareUrl || mgr.shareUrl(id),
+    })
+    if (job.phase === 'timeout') q.set('pending', '1')
+
+    return json({
+      phase: job.phase,
+      podPhase: job.podPhase,
+      shellReady: job.shellReady,
+      elapsedMs: (job.finishedAt ?? Date.now()) - job.createdAt,
+      errorKey: job.errorKey ?? null,
+      query: q.toString(),
+      // 就绪后前端直接 location.replace 到这里，省掉「结果页 → 再点一次打开」
+      // 这一步（用户要求：点确定，等能 shell 了就直接进去）。
+      // 失败/超时不给 shellUrl，让前端去结果页说明情况并给重试按钮。
+      shellUrl: job.phase === 'ready' ? mgr.shareUrl(id) : null,
+    })
+  }
 
   if (p === `${API}/getOSList`) {
     return json(getManager().osList)
@@ -238,8 +289,9 @@ async function handleApi(pathname: string, url: URL): Promise<Response> {
       return json({ message: 'RUN pod ERROR', shareUrl: '', statusCode: 0 })
     }
 
-    // 等就绪再回 shareUrl：调用方拿到地址就能直接连，不会先吃一个 502
-    const ready = await waitUntilRunning(name)
+    // 等到真的能开 shell 再回 shareUrl：调用方拿到地址就能直接连，
+    // 不会先吃一个 502，也不会看到一个还没起好的白页终端
+    const ready = await waitUntilShellReady(name)
     if (ready === 'failed') {
       await mgr.rm(name).catch(() => {})
       return json({ message: 'RUN pod ERROR', shareUrl: '', statusCode: 0 })
@@ -435,34 +487,68 @@ async function handleCreate(req: Request): Promise<Response> {
     return renderWizard(f, 1, false, strings[locale].sentence['err-creation'])
   }
 
-  // 等 Pod 真的 Running 再去结果页。否则用户点「打开系统」会吃到 502，
-  // 误以为创建失败（实际是还在拉镜像）。
-  const ready = await waitUntilRunning(name)
-  if (ready === 'failed') {
-    // 确实是失败：把半成品删掉，别留垃圾 Pod
-    await mgr.rm(name).catch(() => {})
-    return renderWizard(f, 1, false, strings[locale].sentence['err-creation'])
-  }
-
-  // 用 303 跳转，避免刷新页面重复建沙箱；同时让 URL 干净
-  const qs = new URLSearchParams({
-    lang: locale,
-    os: osName,
+  // ★ 这里**不等** Pod 起来，立刻去进度页。
+  //
+  //   之前是 await waitUntilShellReady() 再 303，结果是浏览器转圈 20~90 秒
+  //   （拉镜像 + 起 ttyd），看着像「点了没反应」，网关也可能提前掐断。
+  //
+  //   现在：登记一个后台任务自己等，页面每 1.5s 查 /api/job/<name>，
+  //   真能开 shell 了才自动跳结果页。用户全程看得到「在拉镜像 / 在起容器」。
+  startCreateJob(mgr, {
+    name,
+    locale,
+    osName,
     cpu,
     mem,
     ttl,
-    id: name,
-    url: mgr.shareUrl(name),
+    timeoutMs: READY_TIMEOUT_MS,
+    pollMs: READY_POLL_MS,
   })
-  // 超时就带上 pending=1，结果页据此把「创建成功」换成「还在启动」的措辞
-  if (ready === 'timeout') qs.set('pending', '1')
-  return new Response(null, { status: 303, headers: { Location: `/created?${qs}` } })
+
+  return new Response(null, {
+    status: 303,
+    headers: {
+      Location: `/creating?${new URLSearchParams({
+        lang: locale,
+        os: osName,
+        cpu,
+        mem,
+        ttl,
+        id: name,
+      })}`,
+    },
+  })
+}
+
+/** GET /creating —— 等待系统启动的进度页（带自动轮询） */
+function handleCreating(url: URL, req: Request): Response {
+  const locale = localeOf(url, req)
+  const id = url.searchParams.get('id') ?? ''
+  const osName = url.searchParams.get('os') ?? ''
+  const cpu = url.searchParams.get('cpu') ?? '1'
+  const mem = url.searchParams.get('mem') ?? '512'
+  const ttl = url.searchParams.get('ttl') ?? '24'
+
+  return html(
+    renderToString(
+      renderPage({
+        locale,
+        osList: getManager().osList,
+        selectedOs: osName,
+        containerId: id,
+        cpu,
+        mem,
+        ttl,
+        creating: { podPhase: 'Pending', shellReady: false },
+      }),
+    ),
+  )
 }
 
 /** GET /created —— 创建成功后的结果页（可刷新、可分享） */
 function handleCreated(url: URL, req: Request): Response {
   const id = url.searchParams.get('id') ?? ''
-  const shareUrl = url.searchParams.get('url') ?? (id ? `/console/${id}` : '')
+  const shareUrl = url.searchParams.get('url') || (id ? `/console/${id}` : '')
   return renderHome(url, req, {
     created: true,
     containerId: id,
@@ -529,6 +615,7 @@ const server = Bun.serve<WsState>({
     if (pathname === '/wizard' && req.method === 'POST') return handleWizard(req)
     if (pathname === '/create' && req.method === 'POST') return handleCreate(req)
     if (pathname === '/purge' && req.method === 'POST') return handlePurge(req)
+    if (pathname === '/creating') return handleCreating(url, req)
     if (pathname === '/created') return handleCreated(url, req)
 
     // ---- 沙箱 WebSocket：/console/<pod>/ws
@@ -554,7 +641,18 @@ const server = Bun.serve<WsState>({
       const pod = consoleMatch[1]
       if (!POD_RE.test(pod)) return text('unknown console target', 404)
 
-      const rest = consoleMatch[2] || '/'
+      // ★ 不带尾斜杠的 /console/<pod> 必须先跳到 /console/<pod>/。
+      //   否则 ttyd 页面里的相对地址（ws / token）会被浏览器解析到
+      //   /console/ws，等于把 pod 名当成 "ws" → 404，终端永远黑屏。
+      //   这就是「点 Launch 跳到没有前缀的地址」那个 bug 的根因。
+      if (!consoleMatch[2]) {
+        return new Response(null, {
+          status: 301,
+          headers: { Location: `/console/${pod}/${url.search}` },
+        })
+      }
+
+      const rest = consoleMatch[2]
       const target = `http://${sandboxHost(pod)}${rest}${url.search}`
 
       // 记一次访问，给空闲回收用（不阻塞响应）

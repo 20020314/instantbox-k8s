@@ -172,11 +172,10 @@ describe('第一步：选系统（200px 卡片横排 + 版本下拉）', () => {
     expect(b).not.toContain('class="res-form"')
   })
 
-  test('每个发行版都有自己的内联图标（不走 CDN）', () => {
-    const icons = b.match(/data:image\/svg\+xml/g) ?? []
-    expect(icons.length).toBe(2)
-    // 绝不能引用外网 logo（内网集群拉不到）
-    expect(b).not.toContain('example.com')
+  test('图标用 manifest 的 logoUrl（原版就是直接吃 logoUrl）', () => {
+    // 原版：<img src={item.logoUrl} />，manifest 指向 instantbox-images 的 CDN
+    expect(b).toContain('src="https://example.com/ubuntu.png"')
+    expect(b).toContain('src="https://example.com/debian.png"')
   })
 })
 
