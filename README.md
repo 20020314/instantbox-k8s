@@ -125,11 +125,27 @@ docker build -t instantbox-frontend:latest ./frontend \
 
 ### 3. 应用
 
+在能访问集群 API 的机器上（集群节点本身最省事）：
+
 ```bash
+# 方式 A：一键脚本（apply + 等就绪 + 打印入口 + 冒烟测试）
+KUBECONFIG=/root/.kube/config bash deploy/deploy.sh
+# k3s 就是 KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# 方式 B：手工
 kubectl apply -f deploy/instantbox-k8s.yaml
 kubectl -n instantbox get pod,svc,cronjob
-# 默认入口：集群任意节点 http://<node-ip>:30888  （或改 Service instantbox 为 LoadBalancer/Ingress）
 ```
+
+`kubectl apply` 之后看什么：
+
+- `kubectl -n instantbox get pod` —— server 应该 `1/1 Running`。readiness 探的是 `/readyz`，
+  它会真打一次 apiserver，所以 **Ready 就等于"SA 权限配对了"**
+- 一直 `0/1 Running` → `kubectl -n instantbox logs deploy/server` 看是不是 403（Role 权限）
+  或 namespace 不匹配（ConfigMap 的 `INSTANTBOX_POD_NAMESPACE` vs Role 所在 namespace）
+- 页面能打开但建沙箱失败 → 看 server 日志里的 `create_namespaced_pod` 报错，多半是配额或镜像拉取
+
+入口：集群任意节点 `http://<node-ip>:30888`（或把 Service `instantbox` 改成 LoadBalancer / 挂 Ingress）
 
 ### 4. 冒烟测试
 
