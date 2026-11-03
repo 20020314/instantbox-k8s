@@ -42,7 +42,9 @@ jobs:
 
       - name: Install dev deps (typecheck only)
         working-directory: server-bun
-        run: bun install --frozen-lockfile || bun install
+        # 不锁 lockfile（见 .gitignore 里的说明）：
+        # 只有 @types/bun + typescript 两个 devDeps，装最新即可。
+        run: bun install
 
       - name: Unit tests
         working-directory: server-bun
@@ -57,7 +59,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+          # ★ 必须关掉 pip 缓存：仓库里已经没有 requirements.txt 了
+          #   （Python 后端已删），setup-python 找不到文件会直接 fail 这个 step。
+          cache: false
 
       - name: Validate k8s manifest offline
         working-directory: deploy

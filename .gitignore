@@ -4,6 +4,13 @@ node_modules/
 __pycache__/
 *.py[cod]
 
+# 不提交 bun 的 lockfile：
+#   只有 @types/bun + typescript 两个 devDeps，锁它带来的收益远小于摩擦。
+#   而且不同 bun 版本的 lockfileVersion 不互通（本地 1.4 写的 v2，CI 的 1.2 读不了，
+#   直接 "Unknown lockfile version" + "lockfile had changes, but lockfile is frozen" 失败）。
+bun.lock
+bun.lockb
+
 # 构建产物
 dist/
 
