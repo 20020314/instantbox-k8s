@@ -56,4 +56,7 @@ RUN set -eux; \
 
 EXPOSE 1588
 WORKDIR /home
-CMD ["ttyd", "-p", "1588", "bash"]
+# -W / --writable 是必须的：ttyd 默认「客户端只读」，WebSocket 连上了、banner 也打出来了，
+# 但浏览器里敲任何键都不会送给 pty，表现为「终端能打开、打不了字」。
+# 排查时极易被误导成 PID 1 / tty / stdin / 反代的问题 —— 实测这些全无关。
+CMD ["ttyd", "-p", "1588", "-W", "bash"]

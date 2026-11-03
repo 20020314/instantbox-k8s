@@ -36,6 +36,11 @@ SERVER_PORT = _int('INSTANTBOX_SERVER_PORT', 65501)
 # 沙箱 Pod 里 ttyd 监听的端口（官方 instantbox-* 镜像固定 1588）
 TTYD_PORT = _int('INSTANTBOX_TTYD_PORT', 1588)
 
+# 显式下发给沙箱容器的启动命令。留空 = 用镜像自带的 CMD。
+# 兜底用：万一用了上游那种没带 -W 的旧镜像，ttyd 会退化成「客户端只读」，
+# 浏览器里能出提示符但打不了字。设成 "ttyd -p 1588 -W bash" 可以强行纠正。
+SANDBOX_COMMAND = os.environ.get('INSTANTBOX_SANDBOX_COMMAND', '').strip()
+
 # 沙箱镜像仓库前缀覆盖，例如内网 harbor：harbor.local/instantbox/ ->
 # 配合 manifest.json 的 osCode（instantbox/ubuntu:20.04）拼接
 IMAGE_REGISTRY_PREFIX = os.environ.get('INSTANTBOX_IMAGE_PREFIX', '')

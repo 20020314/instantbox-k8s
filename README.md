@@ -244,11 +244,11 @@ rules:
 K8s 里改成集群 DNS，并且把 pod 名限制得死死的（防 SSRF，避免有人拿 `/console/kubernetes` 打 apiserver）：
 
 ```nginx
-location ~ ^/console/(instantbox-managed-[a-z0-9]{4,40})(/.*)?$ {
+location ~ "^/console/(instantbox-managed-[a-z0-9]{4,40})(/.*)?$" {
     set $pod_name $1;
-    set $console_upstream http://$pod_name:1588;
-    resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
-    rewrite ^/console/[^/]+(/.*)?$ $1 break;
+    set $console_upstream http://$pod_name.instantbox.svc.cluster.local:1588;
+    resolver 10.43.0.10 valid=10s ipv6=off;
+    rewrite "^/console/[^/]+(/.*)?$" $1 break;
     proxy_pass $console_upstream;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
@@ -259,7 +259,10 @@ location ~ ^/console/(instantbox-managed-[a-z0-9]{4,40})(/.*)?$ {
 
 - 正则直接写死 `instantbox-managed-` 前缀，且只允许 `[a-z0-9]`，**`. / :` 全被排除**，SSRF 面收窄。
 - 前缀如果要改，`INSTANTBOX_PREFIX` 和这里必须同步改。
-- 换了 coredns 名字（比如 k3s 的 `kube-dns` 仍然是 `kube-dns.kube-system.svc.cluster.local`）才需要动 resolver。
+- 上游必须写 **FQDN** `$pod_name.<ns>.svc.cluster.local`，见坑 #12。
+- resolver 必须写集群 DNS 的 **IP**（k3s 默认 `10.43.0.10`，标准 kubeadm 集群一般是 `10.96.0.10`）：
+  `kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'`。
+- 裸 Pod 没有 A 记录，名字能解析是靠 server 端给每个沙箱建的**同名 headless Service**，见坑 #13。
 
 ---
 
@@ -338,7 +341,20 @@ INSTANTBOX_IMAGE_PREFIX: "harbor.local/dockerhub/"    # harbor 的 dockerhub 代
 > 已实测 `instantbox/ubuntu` 在 Docker Hub 公开可用（manifest 200）；`instantbox/alpine` 没有
 > `18.04` 这个 tag 是正常的，它只有 `3.x`。若某个 tag 404，先照 manifest 里的名字去 Hub 核一遍。
 
-`IMAGE_PULL_POLICY` 默认 `IfNotPresent`，别用 `Always`——每次建 Pod 都去 check manifest 会拖慢。
+`INSTANTBOX_IMAGE_PULL_POLICY` 默认 `IfNotPresent`——沙箱镜像 tag 是固定的，没必要每次建 Pod
+都去 check manifest。
+
+> 但**本项目自己的 server / frontend 两个 Deployment 用 `imagePullPolicy: Always`**：
+> 它们的 tag 是 `:latest`，配 `IfNotPresent` 时节点上留着旧镜像就永远不更新，改了代码部署完看着
+> 一切正常，实际跑的还是老版本（实测卡过一次）。想省拉取开销，就把 CI 改成推不可变 tag
+> （`:sha-xxxxxxx`）再回到 `IfNotPresent`。
+
+### 6.1 沙箱镜像得自己构建（上游只有 amd64）
+
+上游 `instantbox/ubuntu` 的 `ENTRYPOINT` 是 `ttyd_linux.x86_64`，且 manifest 里只有 amd64。
+在 arm64 节点上是 `exec format error`。所以 `sandbox/` 里自己做了多架构镜像
+（`ttyd` 按 `TARGETARCH` 下 x86_64 / aarch64）并推到 ghcr，`server/manifest.json` 只列 CI 真构建过的 5 个。
+加新发行版 = 改 `sandbox/gen_manifest.py` 的 `GROUPS` + workflow 的 `matrix`，两处要一致。
 
 ### 7. 前端路由的历史包袱
 
@@ -398,6 +414,50 @@ containerInfo.shareUrl.replace('http://:', `http://${window.location.hostname}:`
 上游 Dockerfile 里是 `ADD https://raw.githubusercontent.com/.../manifest.json .`，
 国内弱网下 `ADD` 会卡到超时（我在本机实测 `curl` 25s 拿不到）。现在把清单**放进仓库**
 `server/manifest.json` 一起 COPY 进镜像，构建和运行都不依赖外网。
+
+### 12. nginx 的 resolver 不做 search 域补全（`/console` 502 的真凶）
+
+现象：沙箱 Pod `Running`、headless Service 也建好了，容器里 `nslookup <pod>`、`wget http://<pod>:1588`
+全都通，但 nginx 一直报：
+
+```
+[error] instantbox-managed-xxx could not be resolved (3: Host not found)
+```
+
+原因是 **nginx 的 `resolver` 是纯 DNS 客户端，它把主机名原样（带尾点）发给 DNS 服务器**，
+不会像 glibc / musl 的 `getaddrinfo` 那样按 `/etc/resolv.conf` 的 `search` 域逐个补全。
+所以 `nslookup` 能通（libc 帮你补了 `instantbox.svc.cluster.local`），nginx 不通。
+
+> 排查时特别容易误判：`getent hosts <短名>` 成功并不代表 nginx 能解析，两者走的是不同代码路径。
+
+正确写法：`proxy_pass` 的主机名给**全名**。
+
+```nginx
+set $console_upstream http://$pod_name.instantbox.svc.cluster.local:1588;
+```
+
+### 13. `resolver` 的地址不能用集群域名
+
+顺手写 `resolver kube-dns.kube-system.svc.cluster.local` 看着很优雅，但那是**要解析的域名**，
+而 resolver 本身就是用来做解析的——鸡生蛋。实测直接解析失败，必须给 IP：
+
+```nginx
+resolver 10.43.0.10 valid=10s ipv6=off;     # k3s 默认；kubeadm 一般 10.96.0.10
+```
+
+### 14. 裸 Pod 没有 A 记录，要配同名 headless Service
+
+docker-compose 时代容器名直接可解析，K8s 不是：**Pod 本身不产生 DNS 记录**（哪怕它和访问方同
+namespace）。想让 `<pod>.<ns>.svc.cluster.local` 解析到 Pod IP，必须有个 Service 选它。
+所以 `is_create_container()` 建完 Pod 会紧接着建一个同名 headless Service：
+
+```python
+client.V1ServiceSpec(cluster_ip='None', selector={'app': container_name}, ports=[...1588])
+```
+
+配套：Pod label 里加 `app: <pod名>` 供 selector 选中；删 Pod 时把 Service 一起删（`_delete()` 已处理），
+否则名字会被占着，同名沙箱重建时 409。
+Role 也要放 `services` 的 `get/list/create/delete`，见 `deploy/instantbox-k8s.yaml`。
 
 ---
 

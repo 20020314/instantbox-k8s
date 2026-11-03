@@ -87,8 +87,9 @@ class InstantboxManager(object):
                     labels=labels,
                 ),
                 spec=client.V1PodSpec(
-                    # 沙箱镜像的 ENTRYPOINT/CMD（ttyd）保持原样，不注入进程包装，
+                    # 沙箱镜像的 ENTRYPOINT/CMD（ttyd -W）保持原样，不注入进程包装，
                     # 容器内照常可以 ps / kill。过期回收由 server 的回收器负责。
+                    # 只有显式配了 INSTANTBOX_SANDBOX_COMMAND 才覆盖（兜底旧镜像）。
                     restart_policy='Never',
                     automount_service_account_token=False,
                     enable_service_links=False,
@@ -99,6 +100,7 @@ class InstantboxManager(object):
                             name='box',
                             image=self._image_for(os_name),
                             image_pull_policy=cfg.IMAGE_PULL_POLICY,
+                            command=cfg.SANDBOX_COMMAND.split() or None,
                             ports=[client.V1ContainerPort(
                                 name='ttyd',
                                 container_port=cfg.TTYD_PORT,
