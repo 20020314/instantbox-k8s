@@ -56,18 +56,16 @@ jobs:
         continue-on-error: true
         run: bunx tsc --noEmit
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          # ★ 必须关掉 pip 缓存：仓库里已经没有 requirements.txt 了
-          #   （Python 后端已删），setup-python 找不到文件会直接 fail 这个 step。
-          cache: false
-
+      # 不要用 actions/setup-python：
+      #   ubuntu-latest 自带 python3.12，而 setup-python 的 `cache` 参数很麻烦——
+      #   `cache: pip` 会去找 requirements.txt（仓库里已经没有了）直接 fail；
+      #   `cache: false` 又会被当成字符串，报 "Caching for 'false' is not supported"。
+      #   这里只需要 python + pip install 两个包，系统自带的够了。
       - name: Validate k8s manifest offline
         working-directory: deploy
         run: |
-          pip install kubernetes pyyaml
-          python validate_manifest.py ./instantbox-k8s.yaml
+          python3 -m pip install --quiet kubernetes pyyaml
+          python3 validate_manifest.py ./instantbox-k8s.yaml
 
   # ------------------------------------------------------------------ 应用镜像
   build-server:
