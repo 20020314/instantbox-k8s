@@ -14,12 +14,16 @@ on:
       - 'server/**'
       - 'frontend/**'
       - 'sandbox/**'
+      # deploy/ 必须算进去：清单校验是 server-test 的一部分，
+      # 漏掉它的话「只改 yaml」不会触发 CI —— 而清单恰恰是最该被校验的东西。
+      - 'deploy/**'
       - '.github/workflows/**'
   pull_request:
     paths:
       - 'server/**'
       - 'frontend/**'
       - 'sandbox/**'
+      - 'deploy/**'
   workflow_dispatch:
 
 env:
