@@ -1,17 +1,14 @@
-# instantbox on Kubernetes —— Bun 一体化版本
+# instantbox on Kubernetes
 #
-# 架构（只有一个应用镜像）：
-#   Deployment instantbox   —— Bun 进程同时是：
-#                               * 前端（JSX 服务端渲染，无构建步骤）
-#                               * 控制面（用 ServiceAccount 调 k8s API 建/删 Pod）
-#                               * 网关（/console/<pod> 的 HTTP + WebSocket 反代）
-#                               * 回收器（进程内定时扫过期沙箱）
-#
-# 相比上一版去掉的东西：nginx、Caddy、React 构建、prune CronJob、两个额外镜像。
-# 只保留一个 Deployment + 一个 NodePort Service + RBAC + ConfigMap。
+# 架构（相比原版 docker-compose）：
+#   frontend(nginx)  ——  同时干两件事：托管静态页 + 反代（原来的 /console/<name> 逻辑）
+#   server(flask)    ——  用 ServiceAccount 调 k8s API 建/删 Pod，不再挂 docker.sock
+#   cron(CronJob)    ——  每分钟调 /api/v2/superinspire/prune 回收过期 Pod
 #
 # 应用：
 #   kubectl apply -f instantbox-k8s.yaml
+# 改域名/镜像仓库：
+#   编辑下面的 ConfigMap 与 frontend 里 INSTANTBOX_CONSOLE_DOMAIN
 ---
 apiVersion: v1
 kind: Namespace
@@ -19,8 +16,7 @@ metadata:
   name: instantbox
 ---
 # ---------------------------------------------------------------- 权限
-# 只给最小权限：Pod 的增删查改 + Service 的增删查，且仅限本 namespace。
-# 沙箱 Pod 本身 automountServiceAccountToken=false，拿不到任何集群凭据。
+# 只给 Pod 的最小权限：list/watch/get/create/delete/patch，且仅限本 namespace
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -36,8 +32,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
-  # 每个沙箱配一个同名 headless Service，网关才能按名字解析到 Pod IP
-  # （K8s 不为裸 Pod 建 A 记录）
+  # 每个沙箱配一个同名 headless Service，nginx 才能按名字解析到 Pod IP
+  # （K8s 不为裸 Pod 建 A 记录，Docker compose 才会）
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "create", "delete"]
@@ -69,74 +65,70 @@ metadata:
 data:
   INSTANTBOX_POD_NAMESPACE: "instantbox"
   INSTANTBOX_PREFIX: "instantbox-managed-"
-  INSTANTBOX_SERVER_PORT: "65501"
   INSTANTBOX_TTYD_PORT: "1588"
-  # 留空 = 用同域相对路径 /console/<pod>（默认，不需要 DNS 泛解析）
+  # 前端 shareUrl = http://<pod>.<domain>；不上域名也行，走 /console/<pod> 路径
   INSTANTBOX_CONSOLE_DOMAIN: ""
   INSTANTBOX_SCHEME: "http"
   INSTANTBOX_CONSOLE_PORT: ""
-  # 内网 harbor 代理前缀，例如 harbor.local/dockerhub/；留空则直连
+  # 内网 harbor 代理前缀，例如 harbor.local/dockerhub/，留空则直连 docker.io
   INSTANTBOX_IMAGE_PREFIX: ""
-  # 沙箱镜像 tag 是 :latest。配 IfNotPresent 时节点上有旧缓存就永远不更新
+  # 沙箱镜像 tag 是 :latest，配 IfNotPresent 时节点上有旧缓存就永远不更新
   # （改完沙箱 Dockerfile 重建镜像，新建的沙箱跑的还是老镜像，极难发现）。
-  # 实测踩过一次，所以这里用 Always。
+  # 实测踩过一次，所以这里跟 server/frontend 一样用 Always。
+  # 想省拉取开销：把 manifest 里的 osCode 改成不可变 tag（:sha-xxxxxxx）再回 IfNotPresent。
   INSTANTBOX_IMAGE_PULL_POLICY: "Always"
   # 空闲多少秒没访问就回收，0 = 只按 TTL 回收
   INSTANTBOX_IDLE_TIMEOUT: "0"
-  # 进程内回收扫描间隔（秒）。0 = 关闭，改用外部 CronJob 打 /api/v2/superinspire/prune
-  INSTANTBOX_SWEEP_INTERVAL: "60"
   INSTANTBOX_MAX_CPU_MILLI: "4000"
   INSTANTBOX_MAX_MEM_MB: "4096"
-  # 有 gvisor/kata 建议填上；k3s 默认没有 gvisor RuntimeClass
+  # 有 gvisor/kata 建议填上：k3s 默认没有 gvisor RuntimeClass
   INSTANTBOX_RUNTIME_CLASS: ""
 ---
-# ---------------------------------------------------------------- 应用（唯一部署）
+# ---------------------------------------------------------------- 控制面
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: instantbox
+  name: server
   namespace: instantbox
-  labels: {app: instantbox}
+  labels: {app: instantbox-server}
 spec:
-  replicas: 2
+  replicas: 1          # 建议保持 1，多副本时 cron 会重复触发（无害但吵）
   selector:
-    matchLabels: {app: instantbox}
+    matchLabels: {app: instantbox-server}
   template:
     metadata:
-      labels: {app: instantbox}
+      labels: {app: instantbox-server}
     spec:
       serviceAccountName: instantbox-server
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
-        # oven/bun 镜像里的 bun 用户是 UID 1000
-        runAsUser: 1000
-        runAsGroup: 1000
+        runAsUser: 65534          # nobody
         seccompProfile: {type: RuntimeDefault}
       containers:
-        - name: app
+        - name: server
           image: ghcr.io/20020314/instantbox-server:latest
           # 用 :latest 必须 Always，否则节点上留着旧镜像就永远不更新。
-          # 判断「到底跑的是不是新镜像」要看 imageID 的 digest，不是 tag。
+          # 想省拉取开销就改用 :sha-xxxxxxx 这类不可变 tag + IfNotPresent。
           imagePullPolicy: Always
           envFrom:
             - configMapRef: {name: instantbox-config}
           ports:
             - {name: http, containerPort: 65501}
           readinessProbe:
-            # readyz 会真的列一次沙箱 Pod：SA 权限配错 / 集群不可达时不接流量
+            # readyz 会真的打一次 apiserver，SA 权限配错 / 集群不可达时 Pod 不接流量
             httpGet: {path: /readyz, port: 65501}
-            initialDelaySeconds: 2
+            initialDelaySeconds: 3
             periodSeconds: 10
             failureThreshold: 3
           livenessProbe:
-            # healthz 只表示进程活着，避免集群抖动导致应用被反复重启
+            # healthz 只表示进程活着，避免集群抖动导致 control plane 被反复重启
             httpGet: {path: /healthz, port: 65501}
             initialDelaySeconds: 15
             periodSeconds: 20
             failureThreshold: 5
           resources:
-            requests: {cpu: 50m, memory: 96Mi}
+            requests: {cpu: 50m, memory: 128Mi}
             limits:   {cpu: 500m, memory: 256Mi}
           securityContext:
             allowPrivilegeEscalation: false
@@ -146,14 +138,187 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: instantbox
+  name: server
   namespace: instantbox
 spec:
-  # 对外入口。NodePort 还是 LoadBalancer 按你们集群改
-  type: NodePort
-  selector: {app: instantbox}
+  selector: {app: instantbox-server}
+  ports:
+    - name: http
+      port: 65501
+      targetPort: 65501
+---
+# ---------------------------------------------------------------- 网关（Caddy）
+# 唯一的对外入口。一个容器同时做：静态资源 + /api 反代 + /console 反代（含 WS）。
+# 换掉 nginx 的原因见 frontend/Caddyfile 顶部注释（/console/<pod> 无尾斜杠时
+# nginx rewrite 空 URI 直接 500）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: instantbox
+  labels: {app: instantbox-gateway}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: instantbox-gateway}
+  template:
+    metadata:
+      labels: {app: instantbox-gateway}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: caddy
+          image: ghcr.io/20020314/instantbox-gateway:latest
+          imagePullPolicy: Always
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: CADDY_LISTEN,     value: ":8080"}
+            - {name: UPSTREAM_API,     value: "server.instantbox.svc.cluster.local:65501"}
+            - {name: POD_NAMESPACE,    value: "instantbox"}
+            - {name: TTYD_PORT,        value: "1588"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 20m, memory: 48Mi}
+            limits:   {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # caddy 官方镜像用 UID/GID 1000，非 root 监听 8080 不需要额外 capability
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: instantbox
+spec:
+  selector: {app: instantbox-gateway}
   ports:
     - name: http
       port: 80
-      targetPort: 65501
+      targetPort: 8080
+---
+# ---------------------------------------------------------------- 纯静态前端
+# 只发静态文件，不做任何反代。用于：
+#   * Ingress / CDN 直接把 / 和 /static/* 打到这里（和 gateway 分工）
+#   * 想单独扩缩容静态资源时
+# 默认不挂到对外入口上——对外走 gateway。要启用就改 instantbox Service 的 selector。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-web
+  namespace: instantbox
+  labels: {app: instantbox-frontend-web}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: instantbox-frontend-web}
+  template:
+    metadata:
+      labels: {app: instantbox-frontend-web}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: web
+          image: ghcr.io/20020314/instantbox-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 10m, memory: 24Mi}
+            limits:   {cpu: 300m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "SETUID", "SETGID"]
+            runAsNonRoot: true
+            runAsUser: 101
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: instantbox
+spec:
+  selector: {app: instantbox-frontend-web}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# 对外入口。用 NodePort 还是 LoadBalancer 按你们集群改
+apiVersion: v1
+kind: Service
+metadata:
+  name: instantbox
+  namespace: instantbox
+spec:
+  type: NodePort
+  selector: {app: instantbox-gateway}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
       nodePort: 30888
+kind: Service
+metadata:
+  name: instantbox
+  namespace: instantbox
+spec:
+  type: NodePort
+  selector: {app: instantbox-frontend}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30888
+---
+# ---------------------------------------------------------------- 过期回收
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: instantbox-prune
+  namespace: instantbox
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          containers:
+            - name: prune
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - sh
+                - -c
+                - curl -fsS --max-time 20 http://server.instantbox.svc.cluster.local:65501/v2/superinspire/prune
+              resources:
+                requests: {cpu: 10m, memory: 16Mi}
+                limits:   {cpu: 100m, memory: 64Mi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            seccompProfile: {type: RuntimeDefault}

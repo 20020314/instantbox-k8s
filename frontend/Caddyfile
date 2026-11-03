@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# instantbox-k8s 边缘反代（Caddy 2）
+#
+# 一个容器干三件事：
+#   1. 静态前端        /  /static/*      -> /srv/www 里的 CRA 构建产物
+#   2. 控制面 API      /api/*           -> server:65501（剥掉 /api 前缀）
+#   3. 沙箱 webshell   /console/<pod>/* -> <pod>.<ns>.svc.cluster.local:1588
+#
+# ---------------------------------------------------------------------------
+# 为什么要换掉 nginx（真实踩过的坑，不是口味问题）
+#
+# 1) `/console/<pod>`（不带尾斜杠）在 nginx 里直接 500：
+#      rewrite "^/console/[^/]+(/.*)?$" $1 break;
+#    $1 捕获组在这条路径上是空串，nginx 判定
+#      "the rewritten URI has a zero length"
+#    -> 500。而前端 shareUrl 返回的正好就是不带尾斜杠的那个。
+#    Caddy 这边 `uri strip_prefix` 对这种情况天然安全，剩空就是 `/`。
+#
+# 2) nginx 的 regex location 和静态兜底的 `try_files ... /index.html` 会互相打架，
+#    静态资源容易被 SPA 兜底吃掉，排查起来非常费劲。
+#    Caddy 的 `handle` 是有序独占匹配——先匹配到的直接 return，不存在互相穿透。
+#
+# 3) Caddy 自带 encode / 缓存头 / 配置可 diff，`caddy adapt` 还能离线校验。
+# ---------------------------------------------------------------------------
+# 环境变量（在 k8s 清单里给）：
+#   UPSTREAM_API    控制面地址，默认 server:65501
+#   POD_NAMESPACE   沙箱所在 namespace，默认 instantbox
+#   TTYD_PORT       沙箱内 ttyd 端口，默认 1588
+#   CADDY_LISTEN    监听地址，默认 :8080
+# ---------------------------------------------------------------------------
+
+# 沙箱反代公用参数
+(console_proxy) {
+	# X-Forwarded-For / -Proto / -Host 由 Caddy 自动处理，不要手写
+	# （caddy validate 会警告 "Unnecessary header_up"）
+	header_up Host      {host}
+	header_up X-Real-IP {remote_host}
+
+	# 交互式 shell：可能长时间没有任何输出，不要让缓冲或超时把它掐掉。
+	# WebSocket 是 Caddy 原生支持的，不需要额外开关。
+	flush_interval -1
+	stream_timeout 24h
+}
+
+{
+	# 容器里不需要 admin API
+	admin off
+	# 不自动申请证书（内网 NodePort/Ingress 后面，要 TLS 就交给 Ingress 或显式 tls 配置）
+	auto_https off
+}
+
+# 公共响应头
+{$CADDY_LISTEN::8080} {
+	# 不对外暴露服务端版本（header 是合法指令，-Server 只是它的参数）
+	header -Server
+
+	# ---------------------------------------------------------------- 健康检查
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# ---------------------------------------------------------------- 控制面 API
+	#  /api/v2/superinspire/getOS  ->  http://server:65501/v2/superinspire/getOS
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy {$UPSTREAM_API::server:65501} {
+			header_up Host {host}
+			# 建 Pod 是同步调用，集群忙时要等几百毫秒，给宽一点
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 35s
+			}
+		}
+	}
+
+	# ---------------------------------------------------------------- 沙箱 webshell
+	#
+	# 路径约定：/console/<pod-name>[/剩余路径]
+	#
+	# 裸 Pod 没有 A 记录（那是 docker compose 的行为），所以 server 建 Pod 时会给它
+	# 配一个同名 headless Service，解析走 <pod>.<ns>.svc.cluster.local。
+	#
+	# ★ 必须用 FQDN。Go 的 net.Resolver 是纯 DNS 客户端，短名会带尾点直接查，
+	#   不读 /etc/resolv.conf 的 search —— 跟 nginx 一样的坑。
+	#
+	# ★ Caddy 的 reverse_proxy 目标支持占位符，但要求「地址无 scheme 且必须带端口」
+	#   （见官方 direct_reverse_proxy 文档 Upstream addresses）。这里端口是静态后缀，
+	#   主机名部分由正则捕获组在请求时替换。
+	#
+	# ★ 名字限制在 instantbox-managed-[a-z0-9]{4,40}：不能带点、斜杠、@，
+	#   否则拼进 upstream 就成了 SSRF。
+	#
+	handle /console/* {
+		@console path_regexp console ^/console/(instantbox-managed-[a-z0-9]{4,40})(?:/(.*))?$
+
+		handle @console {
+			# 有剩余路径：直接剥掉 /console/<pod> 前缀透传
+			@has_rest vars {re.console.2} != ""
+			handle @has_rest {
+				uri strip_prefix /console/{re.console.1}
+				reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+					import console_proxy
+				}
+			}
+
+			# 无尾斜杠：上游就是 `/`（nginx 在这里 500）
+			handle {
+				rewrite * /
+				reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+					import console_proxy
+				}
+			}
+		}
+
+		# 名字不合规：明确 404，绝不漏到静态兜底
+		handle {
+			respond "unknown console target" 404
+		}
+	}
+
+	# ---------------------------------------------------------------- 静态前端
+	handle {
+		root * /srv/www
+		encode zstd gzip
+
+		# CRA 的静态资源文件名带 contenthash，可以长缓存；index.html 必须不缓存
+		@longcache path /static/*
+		header @longcache Cache-Control "public, max-age=31536000, immutable"
+		header /index.html Cache-Control "no-cache"
+
+		# SPA 兜底：找不到的路径回 index.html
+		try_files {path} /index.html
+		file_server
+	}
+}
+
