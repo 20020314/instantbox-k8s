@@ -72,6 +72,28 @@ LABEL \
   org.label-schema.name="instantbox-gateway" \
   org.label-schema.vcs-url="https://github.com/instantbox/instantbox"
 
+# ★★ 必须重新编译一遍 caddy，不能直接用镜像里自带的 /usr/bin/caddy
+#
+# Caddy 官方镜像的二进制是 xcaddy 交叉编译出来的 CGO 程序，arm64 那一版
+# 动态解释器指到 /lib/ld-linux-aarch64.so.1（glibc），而 alpine 根文件系统里
+# 只有 /lib/ld-musl-aarch64.so.1。后果是：
+#     exec /usr/bin/caddy: operation not permitted
+# 表现极其迷惑 —— 文件在、权限对、0 个 capability 被丢、seccomp 是 0，
+# 怎么查都"看起来能跑"，但 execve 就是失败。amd64 那个 tag 恰好是 musl 的，
+# 所以只有 arm64 节点炸（CI 也会假绿，因为 buildx 交叉编译不执行目标架构）。
+#
+# xcaddy 在 alpine 里跑需要 go + gcc（CGO）。编译产物落在 /usr/local/bin/caddy，
+# 官方镜像的 ENTRYPOINT 是 `caddy`（靠 $PATH 找），覆盖同目录即可。
+RUN set -eux; \
+    apk add --no-cache --virtual .build-deps go gcc musl-dev; \
+    xcaddy build --output /usr/local/bin/caddy; \
+    apk del .build-deps; \
+    rm -rf /root/go /root/.cache; \
+    # 关键断言：解释器必须是 musl，否则说明还是那个坏掉的目标文件
+    readelf -l /usr/local/bin/caddy | grep -q 'ld-musl-' \
+      || (echo "FATAL: caddy 不是 musl 二进制，arm64 上会 exec 失败" >&2; exit 1); \
+    /usr/local/bin/caddy version
+
 COPY --from=builder /app/build/ /srv/www/
 COPY Caddyfile /etc/caddy/Caddyfile
 

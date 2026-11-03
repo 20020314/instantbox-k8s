@@ -189,7 +189,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request'
         with:
@@ -206,7 +205,39 @@ jobs:
             type=semver,pattern={{version}}
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
+      # 装 qemu（binfmt），让 CI 里能真的跑起来 arm64 的镜像做冒烟测试。
+      # buildx 交叉编译只能证明「编得出来」，证明不了「跑得起来」——
+      # 这次线上 exec /usr/bin/caddy: operation not permitted 就是后者。
+      # --load 一次只能装一种架构，所以先按 arm64（线上实际架构）load 出来跑，
+      # 再单独做多架构推送。
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build gateway (arm64, load locally)
+        uses: docker/build-push-action@v6
+        continue-on-error: true
+        with:
+          context: ./frontend
+          target: gateway
+          platforms: linux/arm64
+          load: true
+          tags: instantbox-gateway:prime
+          build-args: |
+            NPM_REGISTRY=https://registry.npmmirror.com
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      # 冒烟测试：镜像最基本的承诺就是「caddy 能在这个架构上跑起来」。
+      # 构建期直接执行，不绿就不推 —— 免得线上看到
+      # exec /usr/bin/caddy: operation not permitted 再回头猜。
+      - name: Smoke test caddy binary
+        run: |
+          set -eux
+          docker run --rm --platform linux/arm64 --entrypoint /usr/bin/caddy \
+            instantbox-gateway:prime version
+
+      - name: Build & push (multi-arch)
+        uses: docker/build-push-action@v6
         with:
           context: ./frontend
           target: gateway
@@ -217,7 +248,6 @@ jobs:
           build-args: |
             NPM_REGISTRY=https://registry.npmmirror.com
           cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
 
   # ------------------------------------------------------------------ 沙箱镜像
   # Docker Hub 的 instantbox/* 只有 amd64，arm64 节点上 no match for platform。
