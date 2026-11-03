@@ -25,6 +25,8 @@ export interface PageState {
   cpu?: string
   mem?: string
   ttl?: string
+  /** Pod 还没进入 Running（镜像还在拉）——结果页要说「正在启动」而不是「已创建」 */
+  pending?: boolean
 }
 
 // ---------------------------------------------------------------- 样式
@@ -72,25 +74,27 @@ nav.lang a[aria-current]{background:var(--accent-weak);color:var(--accent);
 .step{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;
   border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;flex:none}
 
-/* ---- 系统选择：radio + 兄弟选择器，零 JS ---- */
-.os-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:9px}
-.os-opt{position:relative;cursor:pointer}
-.os-opt input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
-.os-face{display:flex;align-items:center;gap:10px;padding:11px 13px;
-  border:1px solid var(--line);border-radius:8px;background:var(--bg);
-  transition:border-color .12s,background .12s}
-.os-opt:hover .os-face{border-color:var(--accent)}
-.os-opt input:checked+.os-face{border-color:var(--accent);background:var(--accent-weak);
+/* ---- 系统总览：一个发行版一行，版本号挂在它自己名下 ---- */
+.os-overview{display:flex;flex-direction:column;gap:8px}
+.os-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:11px 14px;border:1px solid var(--line);border-radius:9px;
+  background:var(--bg);transition:border-color .12s,background .12s}
+.os-row:hover{border-color:var(--accent)}
+.os-row.is-active{border-color:var(--accent);background:var(--accent-weak);
   box-shadow:inset 0 0 0 1px var(--accent)}
-.os-opt input:focus-visible+.os-face{outline:2px solid var(--accent);outline-offset:2px}
-.os-face img{width:24px;height:24px;object-fit:contain;flex:none}
-.os-face .nm{font-weight:500}
+.os-row-head{display:flex;align-items:center;gap:10px;min-width:168px;flex:none}
+.os-row-head img{width:26px;height:26px;object-fit:contain;flex:none}
+.os-row-head .nm{font-weight:600}
+.os-row-head .cnt{font-size:11.5px;color:var(--muted);
+  border:1px solid var(--line);border-radius:999px;padding:0 7px}
+.os-row-vers{display:flex;flex-wrap:wrap;gap:7px}
 
-.versions{display:flex;flex-wrap:wrap;gap:7px}
+/* ---- 版本 chip ---- */
 .ver-opt{position:relative;cursor:pointer}
 .ver-opt input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
-.ver-chip{display:inline-block;padding:6px 15px;border-radius:999px;font-size:13px;
-  border:1px solid var(--line);background:var(--bg);transition:all .12s}
+.ver-chip{display:inline-block;padding:5px 14px;border-radius:999px;font-size:13px;
+  border:1px solid var(--line);background:var(--card);
+  font-variant-numeric:tabular-nums;transition:all .12s}
 .ver-opt:hover .ver-chip{border-color:var(--accent)}
 .ver-opt input:checked+.ver-chip{background:var(--accent);border-color:var(--accent);
   color:#fff;font-weight:600}
@@ -122,6 +126,9 @@ nav.lang a[aria-current]{background:var(--accent-weak);color:var(--accent);
 .notice.err{border-color:var(--err);color:var(--err);
   background:var(--bg)}
 .notice.ok{border-color:var(--ok);background:var(--bg)}
+.notice.wait{border-color:var(--accent);background:var(--accent-weak)}
+.step.wait{background:var(--accent-weak);color:var(--accent);
+  border:1px solid var(--accent)}
 .notice b{color:inherit}
 code{font-family:var(--mono);font-size:12.5px;background:rgba(128,128,128,.14);
   padding:1px 5px;border-radius:4px;word-break:break-all}
@@ -149,35 +156,6 @@ function LangNav({ locale }: { locale: Locale }) {
   )
 }
 
-function OsPicker({ osList, selected }: { osList: OsItem[]; selected: string }) {
-  return (
-    <div class="os-grid">
-      {osList.map((o) => {
-        const first = o.subList[0]?.osCode ?? ''
-        const active = o.subList.some((s) => s.osCode === selected)
-        return (
-          <label class="os-opt">
-            <input
-              type="radio"
-              name="os"
-              value={first}
-              checked={active}
-              form="f"
-              // 换系统时提交一次，让服务端把版本列表换掉（原生 requestSubmit，不依赖任何库）
-              onchange="this.form.requestSubmit()"
-            />
-            <span class="os-face">
-              {/* 内联 SVG，不走外部 CDN —— 内网集群里 CDN 多半不通 */}
-              <img src={osIconDataUrl(o.value, o.label)} alt="" />
-              <span class="nm">{o.label}</span>
-            </span>
-          </label>
-        )
-      })}
-    </div>
-  )
-}
-
 function VersionPicker({ osList, selected }: { osList: OsItem[]; selected: string }) {
   const parent = osList.find((o) => o.subList.some((s) => s.osCode === selected))
   if (!parent) return <div class="empty">—</div>
@@ -200,6 +178,61 @@ function VersionPicker({ osList, selected }: { osList: OsItem[]; selected: strin
   )
 }
 
+/**
+ * 系统总览 —— 每个发行版一行，列出它有哪些版本。
+ *
+ * 原来的做法是把所有版本摊平成一个横向列表，结果 Ubuntu / Debian / Alpine
+ * 的版本号混在一起（"20.04 22.04 24.04 12 3.20"），根本看不出 12 是 Debian 的、
+ * 3.20 是 Alpine 的。现在按发行版分组，每组带自己的图标和名字。
+ */
+function OsOverview({
+  osList,
+  selected,
+  locale,
+}: {
+  osList: OsItem[]
+  selected: string
+  locale: Locale
+}) {
+  const t = strings[locale]
+  return (
+    <div class="os-overview">
+      {osList.map((o) => {
+        const active = o.subList.some((s) => s.osCode === selected)
+        return (
+          <div class={`os-row${active ? ' is-active' : ''}`}>
+            <div class="os-row-head">
+              <img src={osIconDataUrl(o.value, o.label)} alt="" />
+              <span class="nm">{o.label}</span>
+              <span class="cnt">
+                {o.subList.length} {t.keyword['version-unit'] ?? ''}
+              </span>
+            </div>
+            <div class="os-row-vers">
+              {o.subList.map((s) => {
+                const on = s.osCode === selected
+                return (
+                  <label class={`ver-opt${on ? ' is-on' : ''}`}>
+                    <input
+                      type="radio"
+                      name="os"
+                      value={s.osCode}
+                      checked={on}
+                      form="f"
+                      onchange="this.form.requestSubmit()"
+                    />
+                    <span class="ver-chip">{s.label}</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function osLabel(osList: OsItem[], code: string): string {
   for (const o of osList) {
     for (const s of o.subList) if (s.osCode === code) return `${o.label} ${s.label}`
@@ -210,14 +243,17 @@ function osLabel(osList: OsItem[], code: string): string {
 function ResultCard({ state }: { state: PageState }) {
   const t = strings[state.locale]
   const id = state.containerId ?? ''
+  const pending = state.pending === true
   return (
     <div class="card">
       <h2>
-        <span class="step">✓</span>
-        {t.prompt['created-os']}
+        <span class={pending ? 'step wait' : 'step'}>{pending ? '⋯' : '✓'}</span>
+        {pending ? (t.prompt['os-starting'] ?? t.prompt['created-os']) : t.prompt['created-os']}
       </h2>
-      <div class="notice ok">
-        {t.sentence['open-webshell']}
+      <div class={`notice ${pending ? 'wait' : 'ok'}`}>
+        {pending
+          ? (t.sentence['os-starting'] ?? t.sentence['open-webshell'])
+          : t.sentence['open-webshell']}
         <br />
         <span class="hint">{t.sentence['open-webshell-try-again']}</span>
       </div>
@@ -287,9 +323,7 @@ export function renderPage(state: PageState) {
                 <span class="step">1</span>
                 {t.prompt['select-os']}
               </h2>
-              <OsPicker osList={state.osList} selected={selected} />
-              <h2 style="margin-top:20px">{t.prompt['choose-os-version']}</h2>
-              <VersionPicker osList={state.osList} selected={selected} />
+              <OsOverview osList={state.osList} selected={selected} locale={state.locale} />
             </div>
 
             <div class="card">

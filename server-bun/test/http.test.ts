@@ -177,3 +177,29 @@ describe('安全', () => {
     expect(r.headers.get('content-type')).toContain('text/html')
   })
 })
+
+// ---------------------------------------------------------------- 结果页状态
+describe('/created 的待启动标记', () => {
+  const q = 'lang=zh&os=ghcr.io/20020314/sandbox-alpine-3.20:latest&cpu=1&mem=128&ttl=1'
+
+  test('就绪：显示「已创建」，无 wait 样式', async () => {
+    const r = await fetch(`${base}/created?id=instantbox-managed-abc123&url=/console/instantbox-managed-abc123/&${q}`)
+    const html = await r.text()
+    expect(r.status).toBe(200)
+    expect(html).toContain('您已创建系统')
+    expect(html).not.toContain('notice wait')
+  })
+
+  test('未就绪：显示「系统正在启动」，并且仍给打开按钮', async () => {
+    const r = await fetch(
+      `${base}/created?pending=1&id=instantbox-managed-abc123&url=/console/instantbox-managed-abc123/&${q}`,
+    )
+    const html = await r.text()
+    expect(r.status).toBe(200)
+    expect(html).toContain('系统正在启动')
+    expect(html).toContain('notice wait')
+    // 关键：不能被当成失败（bug 就是这个：Pod 建好了但显示失败）
+    expect(html).not.toContain('notice err')
+    expect(html).toContain('/console/instantbox-managed-abc123/')
+  })
+})

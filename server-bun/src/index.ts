@@ -47,6 +47,17 @@ import { renderPage, type PageState } from './frontend/page'
 
 const MAX_TIMEOUT_AHEAD = 3600 * 24
 
+/**
+ * 建完 Pod 后等多久才算「创建成功」。
+ *
+ * 为什么必须等：createPod 只是把 spec 交给 apiserver，Pod 此刻还是 Pending
+ * （调度 + 拉镜像 + 起容器，实测首次拉镜像要 20~90s）。原来不管 phase 直接
+ * 返回成功，用户点「打开系统」立刻 502，看起来像创建失败——而实际上 Pod
+ * 好好地建出来了，只是没就绪。这就是「显示创建失败但其实建了」的根因。
+ */
+const READY_TIMEOUT_MS = 90_000
+const READY_POLL_MS = 1_000
+
 const PUBLIC_DIR =
   process.env.INSTANTBOX_PUBLIC_DIR || join(import.meta.dir, '..', 'public')
 
@@ -165,6 +176,27 @@ function validateForm(cpu: string, mem: string, ttl: string, osName: string): st
   return null
 }
 
+/**
+ * 轮询直到 Pod 进入 Running（或超时/失败）。
+ *
+ * 返回 'running' | 'timeout' | 'failed'。
+ *   * timeout：调度或拉镜像太慢。Pod 还在，调用方应该告诉用户「稍等一下再点」
+ *     而不是「创建失败」——这是两个完全不同的处置。
+ *   * failed ：Pod 进入 Failed / 被驱逐，确实是失败。
+ */
+async function waitUntilRunning(name: string): Promise<'running' | 'timeout' | 'failed'> {
+  const deadline = Date.now() + READY_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const st = await getManager().status(name)
+    // status 返回 null = 查不到（已被回收/删除），当作失败
+    if (!st) return 'failed'
+    if (st.phase === 'Running') return 'running'
+    if (st.phase === 'Failed' || st.phase === 'Succeeded') return 'failed'
+    await Bun.sleep(READY_POLL_MS)
+  }
+  return 'timeout'
+}
+
 // ---------------------------------------------------------------- 控制面
 async function handleApi(pathname: string, url: URL): Promise<Response> {
   const p = pathname.replace(/^\/api/, '')
@@ -205,6 +237,24 @@ async function handleApi(pathname: string, url: URL): Promise<Response> {
     if (!name) {
       return json({ message: 'RUN pod ERROR', shareUrl: '', statusCode: 0 })
     }
+
+    // 等就绪再回 shareUrl：调用方拿到地址就能直接连，不会先吃一个 502
+    const ready = await waitUntilRunning(name)
+    if (ready === 'failed') {
+      await mgr.rm(name).catch(() => {})
+      return json({ message: 'RUN pod ERROR', shareUrl: '', statusCode: 0 })
+    }
+    if (ready === 'timeout') {
+      // Pod 还在拉镜像：不算失败，把地址给出去，让调用方自己决定重试
+      return json({
+        message: 'PENDING',
+        shareUrl: mgr.shareUrl(name),
+        containerId: name,
+        openPort: null,
+        statusCode: 1,
+      })
+    }
+
     return json({
       message: 'SUCCESS',
       shareUrl: mgr.shareUrl(name),
@@ -321,6 +371,28 @@ async function handleCreate(req: Request): Promise<Response> {
     )
   }
 
+  // 等 Pod 真的 Running 再去结果页。否则用户点「打开系统」会吃到 502，
+  // 误以为创建失败（实际是还在拉镜像）。
+  const ready = await waitUntilRunning(name)
+  if (ready === 'failed') {
+    // 确实是失败：把半成品删掉，别留垃圾 Pod
+    await mgr.rm(name).catch(() => {})
+    return html(
+      renderToString(
+        renderPage({
+          locale,
+          osList: mgr.osList,
+          selectedOs: osName,
+          cpu,
+          mem,
+          ttl,
+          error: strings[locale].sentence['err-creation'],
+        }),
+      ),
+      503,
+    )
+  }
+
   // 用 303 跳转，避免刷新页面重复建沙箱；同时让 URL 干净
   const qs = new URLSearchParams({
     lang: locale,
@@ -331,6 +403,8 @@ async function handleCreate(req: Request): Promise<Response> {
     id: name,
     url: mgr.shareUrl(name),
   })
+  // 超时就带上 pending=1，结果页据此把「创建成功」换成「还在启动」的措辞
+  if (ready === 'timeout') qs.set('pending', '1')
   return new Response(null, { status: 303, headers: { Location: `/created?${qs}` } })
 }
 
@@ -338,7 +412,11 @@ async function handleCreate(req: Request): Promise<Response> {
 function handleCreated(url: URL, req: Request): Response {
   const id = url.searchParams.get('id') ?? ''
   const shareUrl = url.searchParams.get('url') ?? (id ? `/console/${id}` : '')
-  return renderHome(url, req, { containerId: id, shareUrl })
+  return renderHome(url, req, {
+    containerId: id,
+    shareUrl,
+    pending: url.searchParams.get('pending') === '1',
+  })
 }
 
 /** POST /purge —— 删除沙箱 */

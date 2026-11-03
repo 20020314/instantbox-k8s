@@ -27,9 +27,11 @@ interface Dict {
     memory: string
     'memory-in-mb': string
     'ttl-in-hours': string
+    'version-unit': string
   }
   prompt: {
     'created-os': string
+    'os-starting': string
     'choose-os': string
     'choose-os-version': string
     'select-os': string
@@ -45,6 +47,7 @@ interface Dict {
   sentence: {
     'open-webshell': string
     'open-webshell-try-again': string
+    'os-starting': string
     'eg-cpu-core-count': string
     'eg-memory-in-mb': string
     'eg-ttl-in-hours': string
@@ -81,9 +84,11 @@ export const strings: Record<Locale, Dict> = {
       memory: '内存',
       'memory-in-mb': '内存 (M)',
       'ttl-in-hours': '使用时长 (H)',
+      'version-unit': '个版本',
     },
     prompt: {
       'created-os': '您已创建系统',
+      'os-starting': '系统正在启动',
       'choose-os': '选择系统',
       'choose-os-version': '选择系统版本',
       'select-os': '选择系统配置',
@@ -98,6 +103,7 @@ export const strings: Record<Locale, Dict> = {
     },
     sentence: {
       'open-webshell': '系统已创建，是否跳转到系统页面？（关闭页面不会自动回收，请用「删除系统」）',
+      'os-starting': '镜像还在拉取，系统启动中。可以先点「打开系统」等待，或稍后回来再点（关闭页面不会自动回收）。',
       'open-webshell-try-again': '若打开的页面报错，请重新点击',
       'eg-cpu-core-count': '如：1',
       'eg-memory-in-mb': '如：512',
@@ -134,9 +140,11 @@ export const strings: Record<Locale, Dict> = {
       memory: '記憶體',
       'memory-in-mb': '記憶體 (M)',
       'ttl-in-hours': '使用時間 (H)',
+      'version-unit': '個版本',
     },
     prompt: {
       'created-os': '您已建立系統',
+      'os-starting': '系統正在啟動',
       'choose-os': '選擇作業系統',
       'choose-os-version': '選擇系統版本',
       'select-os': '選擇系統設定',
@@ -151,6 +159,7 @@ export const strings: Record<Locale, Dict> = {
     },
     sentence: {
       'open-webshell': '系統已建立，是否開啟系統頁面？（關閉頁面不會自動回收，請用「刪除系統」）',
+      'os-starting': '映像檔還在拉取，系統啟動中。可以先點「開啟系統」等待，或稍後再回來點（關閉頁面不會自動回收）。',
       'open-webshell-try-again': '若開啟的頁面出現錯誤，請重試',
       'eg-cpu-core-count': '如：1',
       'eg-memory-in-mb': '如：512',
@@ -187,9 +196,11 @@ export const strings: Record<Locale, Dict> = {
       memory: 'Memory',
       'memory-in-mb': 'Memory (M)',
       'ttl-in-hours': 'Duration (H)',
+      'version-unit': 'versions',
     },
     prompt: {
       'created-os': 'Your instantbox',
+      'os-starting': 'Your instantbox is starting',
       'choose-os': 'Choose OS',
       'choose-os-version': 'Choose version',
       'select-os': 'Choose OS',
@@ -206,6 +217,8 @@ export const strings: Record<Locale, Dict> = {
       'open-webshell':
         'Instantbox has been created. Launch webshell? (Closing the tab does not purge it — use Purge.)',
       'open-webshell-try-again': 'Please click again if webshell encountered an error.',
+      'os-starting':
+        'The image is still being pulled, the sandbox is starting. Launch the webshell and wait, or come back in a minute. (Closing the tab does not purge it.)',
       'eg-cpu-core-count': 'e.g. 1',
       'eg-memory-in-mb': 'e.g. 512',
       'eg-ttl-in-hours': 'e.g. 24',
@@ -241,9 +254,11 @@ export const strings: Record<Locale, Dict> = {
       memory: 'Mémoire',
       'memory-in-mb': 'Mémoire (M)',
       'ttl-in-hours': 'Durée (H)',
+      'version-unit': 'versions',
     },
     prompt: {
       'created-os': 'Votre instantbox',
+      'os-starting': 'Votre instantbox démarre',
       'choose-os': 'Choisir OS',
       'choose-os-version': 'Choisir version',
       'select-os': 'Choisir OS',
@@ -260,6 +275,8 @@ export const strings: Record<Locale, Dict> = {
       'open-webshell':
         "Instantbox a été créé. Lancer shell? (Fermer l'onglet ne le supprime pas — utilisez Purge.)",
       'open-webshell-try-again': "Veuillez cliquer à nouveau si le webshell a rencontré une erreur.",
+      'os-starting':
+        "L'image est en cours de téléchargement, le bac à sable démarre. Ouvrez le shell et patientez, ou revenez dans une minute. (Fermer l'onglet ne le supprime pas.)",
       'eg-cpu-core-count': 'Exemple 1',
       'eg-memory-in-mb': 'Exemple 512',
       'eg-ttl-in-hours': 'Exemple 24',
