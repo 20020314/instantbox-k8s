@@ -13,11 +13,13 @@ on:
     paths:
       - 'server/**'
       - 'frontend/**'
+      - 'sandbox/**'
       - '.github/workflows/**'
   pull_request:
     paths:
       - 'server/**'
       - 'frontend/**'
+      - 'sandbox/**'
   workflow_dispatch:
 
 env:
@@ -217,6 +219,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE=${{ matrix.base }}
-            APT_MIRROR=${{ matrix.family == 'alpine' && '' || 'https://mirrors.tuna.tsinghua.edu.cn/ubuntu' }}
+            APT_MIRROR=
           cache-from: type=gha,scope=sandbox-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=sandbox-${{ matrix.name }}
