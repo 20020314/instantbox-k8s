@@ -1,0 +1,7 @@
+# 只需要源码和清单；node_modules 在镜像里不需要（零运行时依赖）
+*
+!package.json
+!tsconfig.json
+!src/**/*
+!public/**/*
+!manifest.json

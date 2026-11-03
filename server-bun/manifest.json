@@ -1,0 +1,43 @@
+[
+  {
+    "label": "Ubuntu",
+    "value": "ubuntu",
+    "logoUrl": "",
+    "subList": [
+      {
+        "label": "20.04",
+        "osCode": "ghcr.io/20020314/sandbox-ubuntu-20.04:latest"
+      },
+      {
+        "label": "22.04",
+        "osCode": "ghcr.io/20020314/sandbox-ubuntu-22.04:latest"
+      },
+      {
+        "label": "24.04",
+        "osCode": "ghcr.io/20020314/sandbox-ubuntu-24.04:latest"
+      }
+    ]
+  },
+  {
+    "label": "Debian",
+    "value": "debian",
+    "logoUrl": "",
+    "subList": [
+      {
+        "label": "12",
+        "osCode": "ghcr.io/20020314/sandbox-debian-12:latest"
+      }
+    ]
+  },
+  {
+    "label": "Alpine",
+    "value": "alpine",
+    "logoUrl": "",
+    "subList": [
+      {
+        "label": "3.20",
+        "osCode": "ghcr.io/20020314/sandbox-alpine-3.20:latest"
+      }
+    ]
+  }
+]

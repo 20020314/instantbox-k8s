@@ -3,103 +3,71 @@ name: build-images
 # 推 tag / 手动触发。镜像推到 GitHub Container Registry（ghcr.io），
 # 用内置的 GITHUB_TOKEN，不需要另配 secret。
 #
-# 想推 Docker Hub：在仓库 Secrets 里加 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，
-# 然后把 REGISTRY 改成 docker.io/<你的用户名>。
+# 现在的产物只有两个：
+#   instantbox-server    应用本体（控制面 + 前端 + 网关 + 回收器，一个 Bun 进程）
+#   instantbox-sandbox-*  各发行版沙箱（ttyd:1588）
+#
+# 前端不再单独构建：页面是 JSX，Bun 运行时直接编译，没有 webpack/npm 步骤。
 
 on:
   push:
     branches: [main]
     tags: ['v*']
     paths:
-      - 'server/**'
-      - 'frontend/**'
+      - 'server-bun/**'
       - 'sandbox/**'
+      - 'deploy/**'
       - '.github/workflows/**'
   pull_request:
     paths:
-      - 'server/**'
-      - 'frontend/**'
+      - 'server-bun/**'
       - 'sandbox/**'
+      - 'deploy/**'
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  # 后端单测：用假 client，不连集群；顺带离线校验 k8s 清单
-  server-test:
+  # ------------------------------------------------------------------ 单测 + 清单校验
+  # 用 Bun 跑：不需要 pip / pytest / node，一条 bun test 全包。
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2'
+
+      - name: Install dev deps (typecheck only)
+        working-directory: server-bun
+        run: bun install --frozen-lockfile || bun install
+
+      - name: Unit tests
+        working-directory: server-bun
+        run: bun test
+
+      - name: Typecheck
+        working-directory: server-bun
+        # 类型错误不该阻塞发版，但要看得到
+        continue-on-error: true
+        run: bunx tsc --noEmit
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install deps
-        working-directory: server
-        run: pip install -r requirements.txt pytest pyyaml
-      - name: Unit tests
-        working-directory: server
-        run: pytest test_manager.py -q
+
       - name: Validate k8s manifest offline
         working-directory: deploy
-        run: python validate_manifest.py ./instantbox-k8s.yaml
-
-  # 前端：装依赖 + 语法检查 + 真实构建（验证改动真的能编译）
-  frontend-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install deps
-        working-directory: frontend
-        env:
-          npm_config_registry: https://registry.npmmirror.com
         run: |
-          # node-sass 在 linux 上能装预编译包；装不上也没关系（optional）
-          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-      - name: Map sass-loader to dart-sass
-        working-directory: frontend
-        run: node patch-sass-loader.js
-      - name: Syntax check (babel parser)
-        working-directory: frontend
-        run: |
-          node -e '
-          const parser = require("@babel/parser");
-          const fs = require("fs"), path = require("path");
-          const walk = d => fs.readdirSync(d, {withFileTypes: true}).flatMap(e => {
-            const p = path.join(d, e.name);
-            return e.isDirectory() ? walk(p) : (p.endsWith(".js") ? [p] : []);
-          });
-          let bad = 0;
-          for (const f of walk("src")) {
-            try {
-              parser.parse(fs.readFileSync(f, "utf8"), {
-                sourceType: "module", plugins: ["jsx", "classProperties", "classPrivateProperties"]
-              });
-            } catch (e) { console.error("SYNTAX", f, e.message); bad++; }
-          }
-          if (bad) process.exit(1);
-          console.log("all js files parse OK");
-          '
-      - name: Production build
-        working-directory: frontend
-        env:
-          CI: 'false'
-          NODE_OPTIONS: '--openssl-legacy-provider'
-        run: npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/build
-          retention-days: 3
+          pip install kubernetes pyyaml
+          python validate_manifest.py ./instantbox-k8s.yaml
 
+  # ------------------------------------------------------------------ 应用镜像
   build-server:
-    needs: [server-test]
+    needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -125,101 +93,21 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@v6
         with:
-          context: ./server
+          context: ./server-bun
           # 目标集群是 arm64（NVIDIA Spark / GB10），同时保留 amd64 兼容 x86 集群
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
           cache-from: type=gha,scope=server
           cache-to: type=gha,mode=max,scope=server
 
-  # ------------------------------------------------------------------ 镜像 A：纯静态前端
-  build-frontend-web:
-    needs: [frontend-build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/instantbox-frontend
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          target: web
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            NPM_REGISTRY=https://registry.npmmirror.com
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-
-  # ------------------------------------------------------------------ 镜像 B：边缘网关（Caddy）
-  # 同一个 Dockerfile 的 gateway target，复用 builder 层的构建缓存。
-  build-gateway:
-    needs: [frontend-build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/instantbox-gateway
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          target: gateway
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            NPM_REGISTRY=https://registry.npmmirror.com
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-
   # ------------------------------------------------------------------ 沙箱镜像
   # Docker Hub 的 instantbox/* 只有 amd64，arm64 节点上 no match for platform。
-  # 这里用多架构官方基础镜像重建同款（ttyd:1588 + bash），逐个版本推 ghcr。
-  # 新增/删除版本时同步改下面的 matrix 和 server/manifest.json。
+  # 这里用多架构官方基础镜像重建同款（ttyd:1588 + bash + -W），逐个版本推 ghcr。
+  # 新增/删除版本时同步改下面的 matrix 和 server-bun/manifest.json。
   build-sandbox:
+    needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -258,9 +146,3 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE=${{ matrix.base }}
-            APT_MIRROR=
-          cache-from: type=gha,scope=sandbox-${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=sandbox-${{ matrix.name }}
