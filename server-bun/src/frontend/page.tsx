@@ -58,9 +58,10 @@ a{color:#1890ff;text-decoration:none}
 a:hover{color:#40a9ff}
 
 /* ---------- 上游 App.scss ---------- */
-.app{width:800px;margin:0 auto;padding:0 12px 80px}
+/* 原版没有 padding；800px 是硬宽度（不是 max-width），所以内容不会被左右挤偏 */
+.app{width:800px;margin:0 auto}
 .app__title{text-align:center;margin:30px 0;font-size:60px;font-weight:300;
-  color:rgba(0,0,0,.85);letter-spacing:-.02em}
+  color:rgba(0,0,0,.85)}
 .app__title-span{position:relative}
 .app__desc{margin:25px 0;text-align:center}
 .app__lang-switcher{position:absolute;top:10px;right:12px;font-size:14px;color:rgba(0,0,0,.45)}
@@ -92,35 +93,69 @@ a:hover{color:#40a9ff}
   color:rgba(0,0,0,.85);font-weight:500;white-space:nowrap}
 .ant-divider::before,.ant-divider::after{content:'';flex:1;border-top:1px solid #e8e8e8}
 .ant-divider>span{padding:0 1em}
+/* 页面顶部那个 Divider 是 <Divider style={{marginTop:100}}> */
 .ant-divider.plain{margin-top:100px}
+/* Divider type="vertical"：系统名 | 版本号 之间的竖线 */
+.ant-divider.vertical{display:inline-block;flex:none;width:1px;height:.9em;
+  margin:0 8px;background:#e8e8e8;vertical-align:-1px;border:0}
+.ant-divider.vertical::before,.ant-divider.vertical::after{display:none}
 
-/* ---------- antd Steps ---------- */
+/* ---------- 上游 SelectSystemConfig.scss ---------- */
+/* ★ 整个向导是一张白卡片：边框 + min-height:420 + margin:100px auto + padding-bottom:60。
+   少了这层，下面的 Steps / 卡片 / 按钮全都贴着页面左边，按钮也没地方绝对定位。 */
+.select-system-config{border:1px solid #c0c0c0;border-radius:2px;background:#fff;
+  min-height:420px;width:800px;margin:100px auto;padding:20px;
+  padding-bottom:60px;position:relative}
+.select-system-config__step-content{display:flex;flex-wrap:wrap;
+  justify-content:center;align-items:space-around}
+/* 三个按钮钉在卡片右下角。
+   原版每个 button 都是 float:right，容器又绝对定位在右边 —— 结果第一个
+   （Create）最靠右，依次往左是 Next、Back。
+   这里用 flex + row-reverse 复刻：DOM 第一项排在最右边。 */
+.select-system-config__steps-action{position:absolute;right:20px;bottom:20px;
+  margin-top:20px;display:flex;flex-direction:row-reverse;align-items:center}
+.select-system-config__steps-action form,
+.select-system-config__steps-action button{margin:0 4px}
+.select-system-config img{filter:grayscale(100%)}
+.select-system-config .isSelect{filter:none}
+/* antd Card 的 body 内边距被上游改成了 8px（!important） */
+.os-card{padding:8px}
+
+/* ---------- antd Steps（horizontal，默认 size） ---------- */
+/* antd 3 的 Steps：每个 step 是 flex:1，图标 32px 圆，标题和描述在图标右侧，
+   图标和文字整体在各自格子里居中。
+   连接线只连「本步图标右侧」到「下一步图标左侧」，而不是拉满整格 ——
+   这里用 left/right 相对图标位置算：图标在格子中心偏左 4px（gap 8 的一半）。 */
 .ant-steps{display:flex;margin-bottom:16px}
-.ant-steps .step{flex:1;display:flex;align-items:flex-start;position:relative}
+.ant-steps .step{flex:1;display:flex;position:relative;min-width:0}
 .ant-steps .step:not(:last-child)::after{content:'';position:absolute;top:16px;
-  left:calc(50% + 20px);right:0;height:1px;background:#e8e8e8}
-.ant-steps .step.is-done:not(:last-child)::after{background:#1890ff}
+  /* 从本步图标右边 4px 起，到下一格图标左边 4px 止 */
+  left:calc(50% + 16px + 8px);right:calc(-50% + 28px);height:1px;background:#e8e8e8}
 .ant-steps .step-body{display:flex;gap:8px;align-items:flex-start;
-  margin:0 auto;text-align:left;padding-right:8px}
+  margin:0 auto;text-align:left;min-width:0}
 .ant-steps .step-icon{width:32px;height:32px;border-radius:32px;flex:none;
   display:flex;align-items:center;justify-content:center;font-size:16px;
-  border:1px solid rgba(0,0,0,.25);color:rgba(0,0,0,.45);background:#fff}
+  border:1px solid rgba(0,0,0,.25);color:rgba(0,0,0,.45);background:#fff;
+  position:relative;z-index:1}
 .ant-steps .step.is-process .step-icon{border-color:#1890ff;color:#1890ff}
 .ant-steps .step.is-done .step-icon{border-color:#1890ff;background:#1890ff;color:#fff}
-.ant-steps .step-title{font-size:16px;font-weight:500;color:rgba(0,0,0,.45);line-height:32px}
+.ant-steps .step-title{font-size:16px;font-weight:500;color:rgba(0,0,0,.45);
+  line-height:32px;white-space:nowrap}
 .ant-steps .step.is-process .step-title,
-.ant-steps .step.is-done .step-title{color:rgba(0,0,0,.85);font-weight:600}
+.ant-steps .step.is-done .step-title{color:rgba(0,0,0,.85);font-weight:500}
 .ant-steps .step-desc{font-size:14px;color:rgba(0,0,0,.45);margin-top:2px}
 
 /* ---------- 第一步：系统卡片（原版 200px 宽的 antd Card 横排） ---------- */
-.os-cards{display:flex;flex-wrap:wrap;justify-content:center;align-items:flex-start}
+/* 原版：<Card style={{width:200, margin:'10px 25px'}}>，body padding 被改成 8px。
+   Card 本身 padding 0 + 内层 body 8px，所以这里合并成一层 8px。
+   antd Card 没有边框色变化，也没有外发光 —— 选中只靠图标去掉灰度。 */
+.os-cards{display:flex;flex-wrap:wrap;justify-content:center;align-items:space-around}
 .os-card{width:200px;margin:10px 25px;background:#fff;border:1px solid #e8e8e8;
-  border-radius:2px;padding:24px;text-align:center;transition:all .3s}
-.os-card.is-selected{border-color:#1890ff;box-shadow:0 0 0 2px rgba(24,144,255,.15)}
-.os-card-name{text-align:center;color:rgba(0,0,0,.85);font-size:14px}
-.os-card img{display:block;width:120px;height:120px;margin:0 auto;object-fit:contain;
-  opacity:.45;filter:grayscale(1);transition:all .3s}
-.os-card img.isSelect{opacity:1;filter:none}
+  border-radius:2px;padding:8px;text-align:center}
+.os-card-name{text-align:center;color:rgba(0,0,0,.65);font-size:14px}
+.os-card img{display:block;width:120px;height:120px;margin:0 auto;
+  filter:grayscale(100%)}
+.os-card img.isSelect{filter:none}
 
 /* antd Select */
 .ant-select{width:182px;margin-top:10px;position:relative}
@@ -133,14 +168,20 @@ a:hover{color:#40a9ff}
   border-left:4px solid transparent;border-right:4px solid transparent;
   border-top:5px solid rgba(0,0,0,.25);transform:translateY(-50%);pointer-events:none}
 
-/* ---------- 第二步：资源表单（labelCol 10 / wrapperCol 14） ---------- */
-.res-form{max-width:460px;margin:0 auto}
-.res-item{display:flex;align-items:flex-start;margin-bottom:24px}
-.res-item>label{width:41.6667%;padding-right:8px;text-align:right;line-height:32px;
-  color:rgba(0,0,0,.85)}
+/* ---------- 第二步：资源表单（原版 SelectForm：Form layout="horizontal"） ---------- */
+/* antd 3 FormItem horizontal：
+     .ant-form-item            display:flex; 整行居中（justify-content:flex-end 的反向）
+     .ant-form-item-label      labelCol=10/24 → 41.6667%，text-align:right
+     .ant-form-item-control    wrapperCol=14/24 → 58.3333%
+   行与行之间 margin-bottom:24px。
+   原版 Form 没有居中容器，宽度撑满卡片（800 - 20*2 = 760），所以这里不要 max-width。 */
+.res-form{width:100%}
+.res-item{display:flex;align-items:flex-start;margin-bottom:24px;font-size:14px}
+.res-item>label{width:41.6667%;padding:0 8px;text-align:right;
+  color:rgba(0,0,0,.85);line-height:40px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;font-weight:bold}
 .res-item>label::after{content:':';margin:0 8px 0 2px;position:relative;top:-.5px}
 .res-item .ctrl{width:58.3333%}
-.res-hint{font-size:12px;color:rgba(0,0,0,.45);line-height:1.6;margin-top:4px}
 .ant-input{width:200px;height:32px;padding:4px 11px;font-size:14px;font-family:inherit;
   color:rgba(0,0,0,.65);background:#fff;border:1px solid #d9d9d9;border-radius:2px}
 .ant-input:hover{border-color:#40a9ff}
@@ -164,17 +205,26 @@ a:hover{color:#40a9ff}
 .ant-btn-outline-danger{background:#fff;border-color:#ff4d4f;color:#ff4d4f}
 .ant-btn-outline-danger:hover{background:#ff4d4f;color:#fff}
 
+/* 向导按钮的定位由 .select-system-config__steps-action 负责（右下角），
+   这里只保留兜底：万一外壳没生效也不至于全挤在一起 */
 .actions{display:flex;justify-content:center;gap:8px;margin-top:20px}
+.select-system-config__steps-action .actions{position:static;margin:0}
 
 /* ---------- 结果页（原版 isExistContainer 分支） ---------- */
-.result-card{background:#fff;border:1px solid #e8e8e8;border-radius:2px;padding:24px}
-.cfg-form{margin:0;max-width:520px;margin-left:auto;margin-right:auto}
-.cfg-item{display:flex;margin-bottom:16px;line-height:1.5}
-.cfg-item>dt{width:50%;padding-right:8px;text-align:right;color:rgba(0,0,0,.85);font-weight:bold}
+/* 原版：<Card><div className="app__ports"><SystemConfiguration .../></div></Card>
+   Card 撑满 800px，SystemConfiguration 是 labelCol 12 / wrapperCol 12 的 Form。 */
+.result-card{background:#fff;border:1px solid #e8e8e8;border-radius:2px;
+  padding:24px;font-weight:bold}
+.cfg-form{margin:0;width:100%}
+.cfg-item{display:flex;margin-bottom:24px;line-height:1.5;font-size:14px;font-weight:normal}
+/* 原版 customLabel：固定 110px 右对齐，然后才是 labelCol 12 的格子 */
+.cfg-item>dt{width:50%;padding-right:8px;text-align:right;color:rgba(0,0,0,.85)}
 .cfg-item>dt::after{content:':';margin:0 8px 0 2px}
 .cfg-item>dd{margin:0;width:50%;color:rgba(0,0,0,.65);word-break:break-all}
+/* 等价于 antd <Divider type="vertical"> */
 .vert-divider{display:inline-block;width:1px;height:.9em;background:#e8e8e8;
   margin:0 8px;vertical-align:-1px}
+/* 原版是两个 size="large" 的 outline 按钮，各带 margin:10 */
 .result-actions{margin-top:20px;text-align:center}
 .result-actions .ant-btn{margin:10px}
 .notice-line{text-align:center;color:rgba(0,0,0,.45);font-size:13px;margin:8px 0 0}
@@ -322,9 +372,11 @@ function OsCards({
   )
 }
 
-/** 第二步：资源表单（原版 SelectForm：label 右对齐 + 200px 输入框） */
+/** 第二步：资源表单（原版 SelectForm：Form layout="horizontal"，labelCol 10 / wrapperCol 14） */
 function ResourceForm({ state }: { state: PageState }) {
   const t = strings[state.locale]
+  // 字段和上下限照抄上游 SelectForm.getRules()：
+  //   cpu 1~4 / mem 1~3584 / timeout 1~24（port 已被去掉，K8s 下没有对外开放端口这回事）
   const fields = [
     {
       id: 'cpu',
@@ -333,16 +385,14 @@ function ResourceForm({ state }: { state: PageState }) {
       min: '1',
       max: '4',
       ph: t.sentence['eg-cpu-core-count'],
-      hint: t.sentence['msg-cpu-core-count'],
     },
     {
       id: 'mem',
       label: t.keyword['memory-in-mb'],
       value: state.mem ?? '512',
-      min: '64',
+      min: '1',
       max: '3584',
       ph: t.sentence['eg-memory-in-mb'],
-      hint: t.sentence['msg-memory-in-mb'],
     },
     {
       id: 'ttl',
@@ -351,7 +401,6 @@ function ResourceForm({ state }: { state: PageState }) {
       min: '1',
       max: '24',
       ph: t.sentence['eg-ttl-in-hours'],
-      hint: t.sentence['msg-ttl-in-hours'],
     },
   ]
   return (
@@ -373,7 +422,6 @@ function ResourceForm({ state }: { state: PageState }) {
               value={f.value}
               placeholder={f.ph}
             />
-            <div class="res-hint">{f.hint}</div>
           </div>
         </div>
       ))}
@@ -477,8 +525,11 @@ function ResultView({ state }: { state: PageState }) {
   return (
     <div>
       {pending ? <p class="spin-text">{t.sentence['os-starting']}</p> : null}
+      {/* 原版：<Card><div className="app__ports"><SystemConfiguration/></div></Card> */}
       <div class="result-card">
-        <ConfigList state={state} />
+        <div class="app__ports">
+          <ConfigList state={state} />
+        </div>
       </div>
       <div class="result-actions">
         <a
@@ -544,74 +595,80 @@ export function renderPage(state: PageState) {
           {created ? (
             <ResultView state={state} />
           ) : (
-            <div>
-              {/* 只负责接住第一步版本下拉的 requestSubmit：这时候只换系统，绝不建 Pod */}
-              <form id="f" method="post" action="/wizard">
-                <input type="hidden" name="step" value={String(step)} />
-                <LangField locale={state.locale} />
+            <>
+              {/* 原版结构：.select-system-config 白卡片 > Steps > Divider > 内容 > 右下角按钮 */}
+              <div class="select-system-config">
+                {/* 只负责接住第一步版本下拉的 requestSubmit：这时候只换系统，绝不建 Pod */}
+                <form id="f" method="post" action="/wizard">
+                  <input type="hidden" name="step" value={String(step)} />
+                  <LangField locale={state.locale} />
 
-                <Steps locale={state.locale} step={step} />
-                <div class="ant-divider" />
+                  <Steps locale={state.locale} step={step} />
+                  <div class="ant-divider" />
 
-                {step === 0 ? (
-                  <OsCards osList={state.osList} selected={selected} locale={state.locale} />
-                ) : (
-                  <ResourceForm state={state} />
-                )}
-              </form>
+                  <div class="select-system-config__step-content">
+                    {step === 0 ? (
+                      <OsCards osList={state.osList} selected={selected} locale={state.locale} />
+                    ) : (
+                      <ResourceForm state={state} />
+                    )}
+                  </div>
+                </form>
 
-              {/*
-                三个按钮各自一个 form：
-                  * Next / Back 只是重渲染另一屏 → /wizard
-                  * Create 只有第二步才可用 → /create，且服务端先弹 Modal，
-                    带 confirm=1 才是真建（原版 modalVisible 的等价物）
-                原版第一步的 Create 是 disabled，这里保持。
-              */}
-              <div class="actions">
-                {step === 1 ? (
-                  <form method="post" action="/create">
+                {/*
+                  三个按钮各自一个 form（HTML 不允许 form 嵌套）：
+                    * Next / Back 只是重渲染另一屏 → /wizard
+                    * Create 只有第二步才可用 → /create，服务端先弹 Modal，
+                      带 confirm=1 才是真建（原版 modalVisible 的等价物）
+                  原版顺序是 Create / Next / Back，容器用了 row-reverse 让它们在
+                  右下角从右往左排 —— 视觉上第一个是最右边的 Create。
+                */}
+                <div class="select-system-config__steps-action">
+                  {step === 1 ? (
+                    <form method="post" action="/create">
+                      <LangField locale={state.locale} />
+                      <input type="hidden" name="os" value={selected} />
+                      <input type="hidden" name="cpu" value={state.cpu ?? '1'} />
+                      <input type="hidden" name="mem" value={state.mem ?? '512'} />
+                      <input type="hidden" name="ttl" value={state.ttl ?? '24'} />
+                      <button class="ant-btn ant-btn-primary" type="submit">
+                        {t.keyword.create}
+                      </button>
+                    </form>
+                  ) : (
+                    <button class="ant-btn ant-btn-primary" type="button" disabled>
+                      {t.keyword.create}
+                    </button>
+                  )}
+
+                  <form method="post" action="/wizard">
                     <LangField locale={state.locale} />
                     <input type="hidden" name="os" value={selected} />
                     <input type="hidden" name="cpu" value={state.cpu ?? '1'} />
                     <input type="hidden" name="mem" value={state.mem ?? '512'} />
                     <input type="hidden" name="ttl" value={state.ttl ?? '24'} />
-                    <button class="ant-btn ant-btn-primary" type="submit">
-                      {t.keyword.create}
+                    <input type="hidden" name="step" value={String(step)} />
+                    <button class="ant-btn" type="submit" name="action" value="next" disabled={step === 1}>
+                      {t.keyword.next}
                     </button>
                   </form>
-                ) : (
-                  <button class="ant-btn ant-btn-primary" type="button" disabled>
-                    {t.keyword.create}
-                  </button>
-                )}
 
-                <form method="post" action="/wizard">
-                  <LangField locale={state.locale} />
-                  <input type="hidden" name="os" value={selected} />
-                  <input type="hidden" name="cpu" value={state.cpu ?? '1'} />
-                  <input type="hidden" name="mem" value={state.mem ?? '512'} />
-                  <input type="hidden" name="ttl" value={state.ttl ?? '24'} />
-                  <input type="hidden" name="step" value={String(step)} />
-                  <button class="ant-btn" type="submit" name="action" value="next" disabled={step === 1}>
-                    {t.keyword.next}
-                  </button>
-                </form>
-
-                <form method="post" action="/wizard">
-                  <LangField locale={state.locale} />
-                  <input type="hidden" name="os" value={selected} />
-                  <input type="hidden" name="cpu" value={state.cpu ?? '1'} />
-                  <input type="hidden" name="mem" value={state.mem ?? '512'} />
-                  <input type="hidden" name="ttl" value={state.ttl ?? '24'} />
-                  <input type="hidden" name="step" value={String(step)} />
-                  <button class="ant-btn" type="submit" name="action" value="back" disabled={step === 0}>
-                    {t.keyword.back}
-                  </button>
-                </form>
+                  <form method="post" action="/wizard">
+                    <LangField locale={state.locale} />
+                    <input type="hidden" name="os" value={selected} />
+                    <input type="hidden" name="cpu" value={state.cpu ?? '1'} />
+                    <input type="hidden" name="mem" value={state.mem ?? '512'} />
+                    <input type="hidden" name="ttl" value={state.ttl ?? '24'} />
+                    <input type="hidden" name="step" value={String(step)} />
+                    <button class="ant-btn" type="submit" name="action" value="back" disabled={step === 0}>
+                      {t.keyword.back}
+                    </button>
+                  </form>
+                </div>
               </div>
 
               {state.confirm && step === 1 ? <ConfirmModal state={state} /> : null}
-            </div>
+            </>
           )}
         </div>
       </body>

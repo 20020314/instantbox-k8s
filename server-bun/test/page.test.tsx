@@ -136,12 +136,13 @@ describe('第一步：选系统（200px 卡片横排 + 版本下拉）', () => {
     expect(html).toContain('.ant-select{width:182px;margin-top:10px')
   })
 
-  test('每张卡都有版本下拉，选中的卡被高亮', () => {
+  test('每张卡都有版本下拉，选中的卡图标去灰度', () => {
     expect(b.split('class="ant-select"').length - 1).toBe(2)
     expect(b).toContain('os-card is-selected')
-    // 未选中的卡图标是灰的（原版 opacity:.45 + grayscale）
-    expect(html).toContain('opacity:.45;filter:grayscale(1)')
-    expect(b).toContain('class="isSelect"')
+    // 原版是 className={classNames({isSelect})}，配合 scss 里的灰度规则
+    expect(html).toContain('.select-system-config img{filter:grayscale(100%)}')
+    expect(html).toContain('.select-system-config .isSelect{filter:none}')
+    expect(b).toContain('<img class="isSelect"')
     expect(b).toContain('<img class=""')
   })
 
@@ -202,12 +203,23 @@ describe('第二步：选资源', () => {
   })
 
   test('这一步的 Create 可用，且指向 /create', () => {
-    const actions = b.slice(b.indexOf('class="actions"'))
+    // 按钮都在右下角的 __steps-action 容器里
+    const i = b.indexOf('select-system-config__steps-action')
+    expect(i).toBeGreaterThan(-1)
+    const actions = b.slice(i)
     expect(actions).toContain('action="/create"')
     expect(actions).toContain('ant-btn ant-btn-primary" type="submit">创建')
     // 下一步在这里禁用，上一步可用
     expect(actions).toMatch(/name="action" value="next" disabled/)
     expect(actions).toMatch(/name="action" value="back">/)
+  })
+
+  test('向导包在 .select-system-config 白卡片里（原版的边框 + min-height:420）', () => {
+    expect(html).toContain('.select-system-config{border:1px solid #c0c0c0')
+    expect(html).toContain('min-height:420px')
+    expect(html).toContain('margin:100px auto')
+    expect(b).toContain('class="select-system-config"')
+    expect(b).toContain('class="select-system-config__step-content"')
   })
 
   test('第一步的步骤圆圈变成已完成（打勾）', () => {
@@ -269,6 +281,52 @@ describe('确认 Modal（原版 modalVisible）', () => {
 
   test('第一步即使被传了 confirm 也不弹', () => {
     expect(body(render({ step: 0, confirm: true }))).not.toContain('class="mask"')
+  })
+})
+
+// ---------------------------------------------------------------- 布局回归
+// 这三条守的是「页面元素错位」这个真实反馈：
+// 少了 .select-system-config 外壳、.app 上多了 padding、按钮没有绝对定位，
+// 都会让内容贴左、按钮乱跑。用 CSS 原值钉住，别再退化。
+describe('布局回归（错位问题）', () => {
+  const html = render()
+  const b = body(html)
+
+  test('.app 是 800px 硬宽且没有左右 padding（原版就是纯 width）', () => {
+    expect(html).toContain('.app{width:800px;margin:0 auto}')
+    // 不能出现 padding 把内容往里挤
+    expect(html).not.toContain('.app{width:800px;margin:0 auto;padding')
+  })
+
+  test('向导卡片宽度和容器一致（800px），不会左右溢出', () => {
+    expect(html).toContain('.select-system-config{border:1px solid #c0c0c0')
+    expect(html).toContain('width:800px;margin:100px auto')
+    // 卡片有 20px 内边距，内容区是 758px；.app 不能再加 padding，否则会溢出
+    expect(html).toContain('padding:20px')
+  })
+
+  test('内容区和按钮区是卡片的直接子级（DOM 层级对得上）', () => {
+    const card = b.slice(b.indexOf('class="select-system-config"'))
+    const content = card.indexOf('select-system-config__step-content')
+    const action = card.indexOf('select-system-config__steps-action')
+    expect(content).toBeGreaterThan(-1)
+    expect(action).toBeGreaterThan(content) // 按钮区在内容之后
+  })
+
+  test('卡片内图片统一灰度，选中项单独去灰度（原版 scss 两条规则）', () => {
+    expect(html).toContain('.select-system-config img{filter:grayscale(100%)}')
+    expect(html).toContain('.select-system-config .isSelect{filter:none}')
+  })
+
+  test('Steps 连接线只在两个图标之间，不拉满整格', () => {
+    expect(html).toContain('.ant-steps .step:not(:last-child)::after')
+    // 关键：right 是负的 50% 偏移（连到下一格图标），不是 right:0
+    expect(html).toMatch(/\.ant-steps \.step:not\(:last-child\)::after\{[^}]*right:calc\(-50% \+ 28px\)/)
+  })
+
+  test('antd Card body 的 8px 内边距生效（上游用 !important 改过）', () => {
+    expect(html).toContain('.os-card{padding:8px}')
+    expect(html).toContain('margin:10px 25px')
   })
 })
 
