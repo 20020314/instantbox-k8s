@@ -32,6 +32,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  # 每个沙箱配一个同名 headless Service，nginx 才能按名字解析到 Pod IP
+  # （K8s 不为裸 Pod 建 A 记录，Docker compose 才会）
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
   # 排查建 Pod 失败时能看到事件
   - apiGroups: [""]
     resources: ["events"]

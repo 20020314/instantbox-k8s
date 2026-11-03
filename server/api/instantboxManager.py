@@ -75,6 +75,8 @@ class InstantboxManager(object):
             container_name = self.generateContainerName()
             labels = {
                 APP_LABEL_KEY: APP_LABEL_VALUE,
+                # 同名 headless Service 的 selector 靠这个 label 选中本 Pod
+                'app': container_name,
                 TIMEOUT_LABEL: str.format('{:.0f}', os_timeout),
                 LASTSEEN_LABEL: str.format('{:.0f}', time.time()),
             }
@@ -119,12 +121,41 @@ class InstantboxManager(object):
             )
             try:
                 self.core.create_namespaced_pod(body=pod, namespace=self.namespace)
-                return container_name
             except ApiException as exc:
                 # 409 = 名字撞了，换一个重试；其他错误直接失败
                 if exc.status != 409:
                     return None
+                continue
+            # K8s 默认不为裸 Pod 建 A 记录（Docker 的 compose 会），
+            # nginx 反代需要按名字解析，所以补一个同名 headless Service。
+            try:
+                self._create_pod_service(container_name)
+            except ApiException:
+                # Service 建不出来就回收掉 Pod，别留一个访问不到的沙箱
+                self._delete([container_name])
+                return None
+            return container_name
         return None
+
+    def _create_pod_service(self, container_name):
+        """为沙箱 Pod 建同名 headless Service，让 <pod>.<ns>.svc 能解析。"""
+        svc = client.V1Service(
+            metadata=client.V1ObjectMeta(
+                name=container_name,
+                namespace=self.namespace,
+                labels={APP_LABEL_KEY: APP_LABEL_VALUE},
+            ),
+            spec=client.V1ServiceSpec(
+                cluster_ip='None',          # headless：解析直接返回 Pod IP
+                selector={'app': container_name},
+                ports=[client.V1ServicePort(
+                    name='ttyd',
+                    port=cfg.TTYD_PORT,
+                    target_port=cfg.TTYD_PORT,
+                )],
+            ),
+        )
+        self.core.create_namespaced_service(body=svc, namespace=self.namespace)
 
     # ---------------------------------------------------------------- query
     def get_container_ports(self, container_name):
@@ -181,6 +212,11 @@ class InstantboxManager(object):
             except ApiException as exc:
                 if exc.status in (404, 410):
                     deleted += 1
+            # 配套的 headless Service 一起删，否则会一直留着占名字
+            try:
+                self.core.delete_namespaced_service(name, self.namespace)
+            except ApiException:
+                pass
         return deleted
 
     def expired_pods(self, idle_timeout=None):

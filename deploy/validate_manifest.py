@@ -38,10 +38,13 @@ assert fe['spec']['template']['spec']['automountServiceAccountToken'] is False
 print('[ok] frontend: 不挂 SA token')
 
 role = [d for d in docs if d['kind'] == 'Role'][0]
-verbs = role['rules'][0]['verbs']
-assert {'create', 'delete', 'get', 'list', 'patch'} <= set(verbs)
-assert role['rules'][0]['resources'] == ['pods']
-print('[ok] Role verbs={} resources={}'.format(verbs, role['rules'][0]['resources']))
+rules = {tuple(r['resources']): r['verbs'] for r in role['rules']}
+pod_verbs = rules[('pods',)]
+assert {'create', 'delete', 'get', 'list', 'patch'} <= set(pod_verbs)
+# 每个沙箱要配同名 headless Service，nginx 才能按 Pod 名解析
+svc_verbs = rules[('services',)]
+assert {'create', 'delete', 'get', 'list'} <= set(svc_verbs)
+print('[ok] Role pods={} services={}'.format(pod_verbs, svc_verbs))
 
 cm = [d for d in docs if d['kind'] == 'ConfigMap'][0]['data']
 assert cm['INSTANTBOX_POD_NAMESPACE'] == 'instantbox'

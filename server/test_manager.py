@@ -32,6 +32,7 @@ class FakeResp:
 class FakeCore:
     def __init__(self):
         self.pods = {}
+        self.services = {}
         self.created_bodies = []
         self.deleted = []
 
@@ -42,6 +43,18 @@ class FakeCore:
         self.created_bodies.append(body)
         self.pods[name] = FakePod(name, body.metadata.labels)
         return body
+
+    def create_namespaced_service(self, body, namespace):
+        name = body.metadata.name
+        if name in self.services:
+            raise ApiException(status=409)
+        self.services[name] = body
+        return body
+
+    def delete_namespaced_service(self, name, namespace):
+        if name not in self.services:
+            raise ApiException(status=404)
+        self.services.pop(name)
 
     def list_namespaced_pod(self, namespace, label_selector=None):
         return FakeResp(list(self.pods.values()))
@@ -62,6 +75,25 @@ class FakeCore:
             raise ApiException(status=404)
         self.pods[name].metadata.labels.update(body['metadata']['labels'])
         return self.pods[name]
+
+
+def test_sandbox_gets_headless_service(mgr):
+    """每个沙箱要有同名 headless Service，否则 nginx 解析不到 Pod 名。
+
+    K8s 默认不给裸 Pod 建 A 记录（Docker compose 才会），这是迁移时最隐蔽的坑之一。
+    """
+    name = mgr.is_create_container(512, 1, 'ghcr.io/20020314/sandbox-ubuntu-22.04:latest',
+                                   time.time() + 3600)
+    assert name in mgr.core.services
+    svc = mgr.core.services[name]
+    assert svc.spec.cluster_ip == 'None'
+    assert svc.spec.selector == {'app': name}
+    assert svc.spec.ports[0].port == 1588
+    # Pod 上要有能被 selector 选中的 label
+    assert mgr.core.pods[name].metadata.labels['app'] == name
+    # 删 Pod 要连 Service 一起删
+    mgr._delete([name])
+    assert name not in mgr.core.services
 
 
 @pytest.fixture()
