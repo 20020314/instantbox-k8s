@@ -342,13 +342,25 @@ INSTANTBOX_IMAGE_PREFIX: "harbor.local/dockerhub/"    # harbor 的 dockerhub 代
 > 已实测 `instantbox/ubuntu` 在 Docker Hub 公开可用（manifest 200）；`instantbox/alpine` 没有
 > `18.04` 这个 tag 是正常的，它只有 `3.x`。若某个 tag 404，先照 manifest 里的名字去 Hub 核一遍。
 
-`INSTANTBOX_IMAGE_PULL_POLICY` 默认 `IfNotPresent`——沙箱镜像 tag 是固定的，没必要每次建 Pod
-都去 check manifest。
+`INSTANTBOX_IMAGE_PULL_POLICY` **默认 `Always`**，三个地方（server / frontend / 沙箱）统一。
 
-> 但**本项目自己的 server / frontend 两个 Deployment 用 `imagePullPolicy: Always`**：
-> 它们的 tag 是 `:latest`，配 `IfNotPresent` 时节点上留着旧镜像就永远不更新，改了代码部署完看着
-> 一切正常，实际跑的还是老版本（实测卡过一次）。想省拉取开销，就把 CI 改成推不可变 tag
-> （`:sha-xxxxxxx`）再回到 `IfNotPresent`。
+原因：`server/manifest.json` 里的 `osCode` 全是 `:latest`，配 `IfNotPresent` 时节点上有旧缓存就
+**永远不会重新拉**。这个坑在本项目实际发生过两次：
+
+1. server/frontend 改了代码、CI 出了新镜像，`kubectl apply` 后看着一切正常，跑的却是旧版本
+2. 沙箱镜像加了 `-W`（见 §6.2）、CI 也重建了，但新建的沙箱 `ps` 里还是 `ttyd -p 1588 bash` ——
+   Pod 状态 `Running`、镜像名也对，**只有 `ps` 能看出真相**，白排查了好久
+
+判断某次 Pod 到底用的哪个镜像，看 digest 而不是 tag：
+
+```bash
+kubectl -n instantbox get pod <pod> \
+  -o jsonpath='{.status.containerStatuses[0].imageID}{"\n"}'
+# ghcr.io/20020314/sandbox-ubuntu-22.04@sha256:4f87c089...
+```
+
+`Always` 的代价是每次建沙箱都去 check 一次 manifest（层没变不会重下）。真要省这部分，
+就把 manifest 的 `osCode` 换成不可变 tag（`:sha-xxxxxxx` 或按日期 `:20261103`），再回到 `IfNotPresent`。
 
 ### 6.1 沙箱镜像得自己构建（上游只有 amd64）
 
