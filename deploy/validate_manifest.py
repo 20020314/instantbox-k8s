@@ -46,4 +46,19 @@ print('[ok] Role verbs={} resources={}'.format(verbs, role['rules'][0]['resource
 cm = [d for d in docs if d['kind'] == 'ConfigMap'][0]['data']
 assert cm['INSTANTBOX_POD_NAMESPACE'] == 'instantbox'
 print('[ok] ConfigMap {} 项'.format(len(cm)))
+
+# 探针：readiness 要真的探 apiserver，liveness 只探进程
+c = spec['containers'][0]
+assert c['readinessProbe']['httpGet']['path'] == '/readyz'
+assert c['livenessProbe']['httpGet']['path'] == '/healthz'
+print('[ok] server 探针 readiness=/readyz liveness=/healthz')
+
+# 沙箱模板不允许出现任何 hostPath（尤其 docker.sock）
+for dep_doc in [d for d in docs if d['kind'] == 'Deployment']:
+    vs = dep_doc['spec']['template']['spec'].get('volumes', [])
+    for v in vs:
+        assert 'hostPath' not in v, 'Deployment {} 不允许 hostPath'.format(
+            dep_doc['metadata']['name'])
+print('[ok] 所有 Deployment 无 hostPath')
+
 print('ALL OK')

@@ -103,19 +103,61 @@ def test_create_rejects_bad_input(mgr):
     assert mgr.is_create_container(512, 0, 'instantbox/ubuntu:20.04', time.time()) is None
 
 
-def test_no_port_option_anywhere(mgr):
+def test_no_port_option_anywhere(mgr, monkeypatch):
     """端口选项已移除：getOS 返回的 openPort 恒为 null。"""
     import inspire
-    inspire.manager = mgr
+    # inspire.get_manager() 是懒加载的，注入假实例即可，不会去连集群
+    monkeypatch.setattr(inspire, '_manager', mgr)
     client = inspire.app.test_client()
     res = client.get('/v2/superinspire/getOS?os=instantbox/ubuntu:20.04&port=8080')
     data = res.get_json()
     assert data['statusCode'] == 1
     assert data['openPort'] is None
+    assert data['shareUrl'].endswith('/' + data['containerId'])
     # 即使客户端传了 port，也不会写进 Pod
     body = mgr.core.created_bodies[0]
     assert body.spec.containers[0].ports[0].container_port == 1588
     assert body.spec.containers[0].ports[0].host_port is None
+
+
+def test_readyz_ok_when_cluster_reachable(mgr, monkeypatch):
+    """readyz 靠 read_namespaced_pod 探活：404 = 连上了且鉴权通过。"""
+    import inspire
+    monkeypatch.setattr(inspire, '_manager', mgr)
+    res = inspire.app.test_client().get('/readyz')
+    assert res.status_code == 200
+
+
+def test_readyz_fails_when_api_broken(monkeypatch):
+    """apiserver 挂了要返回 503，Pod 必须从 Endpoints 摘掉。"""
+    import inspire
+
+    class BrokenCore:
+        def read_namespaced_pod(self, name, namespace):
+            raise ApiException(status=500, reason='boom')
+
+    broken = type('M', (), {'core': BrokenCore(), 'namespace': 'instantbox'})()
+    monkeypatch.setattr(inspire, '_manager', broken)
+    res = inspire.app.test_client().get('/readyz')
+    assert res.status_code == 503
+
+
+def test_getOS_rejects_expired_timeout(mgr, monkeypatch):
+    """timeout 是绝对时间戳，已经过期要直接拒绝。"""
+    import inspire
+    monkeypatch.setattr(inspire, '_manager', mgr)
+    res = inspire.app.test_client().get(
+        '/v2/superinspire/getOS?os=instantbox/alpine:latest&timeout=1000000000')
+    assert res.get_json()['statusCode'] == 0
+    assert mgr.core.created_bodies == []
+
+
+def test_getOS_rejects_unknown_os(mgr, monkeypatch):
+    import inspire
+    monkeypatch.setattr(inspire, '_manager', mgr)
+    res = inspire.app.test_client().get('/v2/superinspire/getOS?os=evil/image:latest')
+    assert res.get_json()['statusCode'] == 0
+    assert mgr.core.created_bodies == []
 
 
 def test_share_url(mgr):
@@ -166,3 +208,31 @@ def test_image_prefix_override(mgr, monkeypatch):
     mgr.is_create_container(128, 1, 'instantbox/ubuntu:20.04', time.time() + 60)
     assert mgr.core.created_bodies[0].spec.containers[0].image == \
         'harbor.local/proxy/instantbox/ubuntu:20.04'
+
+
+def test_share_url_without_domain(monkeypatch):
+    """INSTANTBOX_CONSOLE_DOMAIN 留空时用同域相对路径，不依赖泛域名。"""
+    monkeypatch.setattr(im.cfg, 'CONSOLE_DOMAIN', '')
+    monkeypatch.setattr(im.cfg, 'CONSOLE_PORT', '')
+    monkeypatch.setattr(im.cfg, 'SCHEME', 'http')
+    m = im.InstantboxManager.__new__(im.InstantboxManager)
+    assert m.share_url('instantbox-managed-abc') == 'http://instantbox-managed-abc'
+
+
+def test_share_url_custom_port(monkeypatch):
+    """非 80/443 端口要拼进 host。"""
+    monkeypatch.setattr(im.cfg, 'CONSOLE_DOMAIN', 'box.example.com')
+    monkeypatch.setattr(im.cfg, 'CONSOLE_PORT', '8443')
+    monkeypatch.setattr(im.cfg, 'SCHEME', 'https')
+    m = im.InstantboxManager.__new__(im.InstantboxManager)
+    assert m.share_url('instantbox-managed-abc') == \
+        'https://instantbox-managed-abc.box.example.com:8443'
+
+
+def test_pod_name_is_dns1123(mgr):
+    """k8s 资源名必须小写字母数字和 '-'，以字母数字开头结尾。"""
+    for _ in range(20):
+        name = mgr.generateContainerName()
+        assert im.POD_NAME_RE.match(name), name
+        assert len(name) <= 63                        # k8s 名字上限
+        assert name.startswith(im.InstantboxManager.CONTAINER_PREFIX)

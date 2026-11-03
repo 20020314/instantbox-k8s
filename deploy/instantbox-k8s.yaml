@@ -105,13 +105,17 @@ spec:
           ports:
             - {name: http, containerPort: 65501}
           readinessProbe:
-            httpGet: {path: /healthz, port: 65501}
+            # readyz 会真的打一次 apiserver，SA 权限配错 / 集群不可达时 Pod 不接流量
+            httpGet: {path: /readyz, port: 65501}
             initialDelaySeconds: 3
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
+            # healthz 只表示进程活着，避免集群抖动导致 control plane 被反复重启
             httpGet: {path: /healthz, port: 65501}
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 5
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits:   {cpu: 500m, memory: 256Mi}

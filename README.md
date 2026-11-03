@@ -54,7 +54,7 @@ instantbox-k8s/
 │   ├── inspire.py              # 路由；getOS 已去掉 port 参数
 │   ├── api/instantboxManager.py# k8s client 建 Pod / 删 Pod / 回收
 │   ├── manifest.json           # OS 镜像清单（已内嵌，不再运行时下载）
-│   ├── test_manager.py         # 11 个单测，用假 client，不连集群
+│   ├── test_manager.py         # 18 个单测，用假 client，不连集群
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/                   # React (antd 3 / CRA 2) + nginx 反代
@@ -415,7 +415,7 @@ containerInfo.shareUrl.replace('http://:', `http://${window.location.hostname}:`
 cd server
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt pytest pyyaml
-.venv/Scripts/python -m pytest test_manager.py -q          # 11 passed，不连真集群
+.venv/Scripts/python -m pytest test_manager.py -q          # 18 passed，不连真集群
 
 cd ../deploy
 ../server/.venv/Scripts/python validate_manifest.py        # 用 k8s 客户端模型反序列化校验 yaml
