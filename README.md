@@ -316,6 +316,9 @@ INSTANTBOX_IMAGE_PREFIX: "harbor.local/dockerhub/"    # harbor 的 dockerhub 代
 
 镜像清单 `server/manifest.json` 里 `osCode` 就是完整镜像名，所以前缀是纯字符串拼接。
 
+> 已实测 `instantbox/ubuntu` 在 Docker Hub 公开可用（manifest 200）；`instantbox/alpine` 没有
+> `18.04` 这个 tag 是正常的，它只有 `3.x`。若某个 tag 404，先照 manifest 里的名字去 Hub 核一遍。
+
 `IMAGE_PULL_POLICY` 默认 `IfNotPresent`，别用 `Always`——每次建 Pod 都去 check manifest 会拖慢。
 
 ### 7. 前端路由的历史包袱
