@@ -147,28 +147,36 @@ spec:
       port: 65501
       targetPort: 65501
 ---
-# ---------------------------------------------------------------- 前端 + 反代
+# ---------------------------------------------------------------- 网关（Caddy）
+# 唯一的对外入口。一个容器同时做：静态资源 + /api 反代 + /console 反代（含 WS）。
+# 换掉 nginx 的原因见 frontend/Caddyfile 顶部注释（/console/<pod> 无尾斜杠时
+# nginx rewrite 空 URI 直接 500）。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend
+  name: gateway
   namespace: instantbox
-  labels: {app: instantbox-frontend}
+  labels: {app: instantbox-gateway}
 spec:
   replicas: 2
   selector:
-    matchLabels: {app: instantbox-frontend}
+    matchLabels: {app: instantbox-gateway}
   template:
     metadata:
-      labels: {app: instantbox-frontend}
+      labels: {app: instantbox-gateway}
     spec:
       automountServiceAccountToken: false
       containers:
-        - name: nginx
-          image: ghcr.io/20020314/instantbox-frontend:latest
+        - name: caddy
+          image: ghcr.io/20020314/instantbox-gateway:latest
           imagePullPolicy: Always
           ports:
             - {name: http, containerPort: 8080}
+          env:
+            - {name: CADDY_LISTEN,     value: ":8080"}
+            - {name: UPSTREAM_API,     value: "server.instantbox.svc.cluster.local:65501"}
+            - {name: POD_NAMESPACE,    value: "instantbox"}
+            - {name: TTYD_PORT,        value: "1588"}
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 10
@@ -182,7 +190,65 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["NET_BIND_SERVICE", "CHOWN", "SETUID", "SETGID"]
+            # caddy 官方镜像用 UID/GID 1000，非 root 监听 8080 不需要额外 capability
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: instantbox
+spec:
+  selector: {app: instantbox-gateway}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# ---------------------------------------------------------------- 纯静态前端
+# 只发静态文件，不做任何反代。用于：
+#   * Ingress / CDN 直接把 / 和 /static/* 打到这里（和 gateway 分工）
+#   * 想单独扩缩容静态资源时
+# 默认不挂到对外入口上——对外走 gateway。要启用就改 instantbox Service 的 selector。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-web
+  namespace: instantbox
+  labels: {app: instantbox-frontend-web}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: instantbox-frontend-web}
+  template:
+    metadata:
+      labels: {app: instantbox-frontend-web}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: web
+          image: ghcr.io/20020314/instantbox-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 10m, memory: 24Mi}
+            limits:   {cpu: 300m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "SETUID", "SETGID"]
+            runAsNonRoot: true
+            runAsUser: 101
 ---
 apiVersion: v1
 kind: Service
@@ -190,7 +256,7 @@ metadata:
   name: frontend
   namespace: instantbox
 spec:
-  selector: {app: instantbox-frontend}
+  selector: {app: instantbox-frontend-web}
   ports:
     - name: http
       port: 80
@@ -198,6 +264,18 @@ spec:
 ---
 # 对外入口。用 NodePort 还是 LoadBalancer 按你们集群改
 apiVersion: v1
+kind: Service
+metadata:
+  name: instantbox
+  namespace: instantbox
+spec:
+  type: NodePort
+  selector: {app: instantbox-gateway}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30888
 kind: Service
 metadata:
   name: instantbox
