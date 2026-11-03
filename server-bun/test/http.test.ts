@@ -56,15 +56,18 @@ describe('JSON API', () => {
 })
 
 describe('页面', () => {
-  test('首页 HTML，带表单和系统列表', async () => {
+  test('首页 HTML，带向导和系统卡片', async () => {
     const r = await fetch(`${base}/`)
     expect(r.status).toBe(200)
     expect(r.headers.get('content-type')).toContain('text/html')
     expect(r.headers.get('cache-control')).toBe('no-store')
     const html = await r.text()
     expect(html).toContain('<html lang="zh">')
-    expect(html).toContain('action="/create"')
-    expect(html).toContain('name="mem"')
+    // 复刻原版的结构锚点
+    expect(html).toContain('class="app__title"')
+    expect(html).toContain('class="app__text-editor-wrap"')
+    expect(html).toContain('class="ant-steps"')
+    expect(html).toContain('class="os-card')
     // 中文页面的标题文案
     expect(html).toContain('选择系统配置')
     expect(html).toContain('Ubuntu')
@@ -74,14 +77,20 @@ describe('页面', () => {
     const html = await (await fetch(`${base}/?lang=en`)).text()
     expect(html).toContain('Choose OS')
     expect(html).toContain('Choose resources')
-    expect(html).toContain('CPU cores')
     expect(html).toContain('<html lang="en">')
+    // 资源字段文案只在第二步出现，这里验 i18n 包本身
+    const step2 = await fetch(`${base}/wizard`, {
+      method: 'POST',
+      body: new URLSearchParams({ os: 'ghcr.io/20020314/sandbox-ubuntu-22.04:latest', step: '1', lang: 'en' }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    }).then((r) => r.text())
+    expect(step2).toContain('CPU cores')
   })
 
   test('?lang=zh_tw 切繁体', async () => {
     const html = await (await fetch(`${base}/?lang=zh_tw`)).text()
     expect(html).toContain('選擇系統設定')
-    expect(html).toContain('記憶體')
+    expect(html).toContain('作業系統')
     expect(html).toContain('<html lang="zh-tw">')
   })
 
@@ -90,13 +99,105 @@ describe('页面', () => {
     expect(await r.text()).toContain('Choisir OS')
   })
 
-  test('?os= 换系统会换版本列表', async () => {
+  test('?os= 换系统会换选中的卡片', async () => {
     const list = (await (await fetch(`${base}/api/v2/superinspire/getOSList`)).json()) as any[]
     const debian = list.find((o) => o.value === 'debian' || o.label === 'Debian')
     if (!debian) return // 没有 debian 就跳过
     const code = debian.subList[0].osCode
     const html = await (await fetch(`${base}/?os=${encodeURIComponent(code)}`)).text()
-    expect(html).toContain('checked')
+
+    // 选中的那一项 selected
+    expect(html).toMatch(new RegExp(`<option value="${code}" selected>`))
+
+    // 而且 is-selected 必须落在 Debian 那张卡上，不能落在 Ubuntu 上
+    expect(html).toContain('<div class="os-card is-selected"><div class="os-card-name">Debian</div>')
+  })
+})
+
+// ---------------------------------------------------------------- 向导流程
+// 这几条钉的是「还没点创建就建成功了」那个 bug：
+// 第一步换版本 / 点下一步 / 点上一步，一律不许打到建 Pod 的路径上。
+describe('向导流程（不碰 k8s）', () => {
+  const UBUNTU = 'ghcr.io/20020314/sandbox-ubuntu-22.04:latest'
+
+  async function post(path: string, fields: Record<string, string>) {
+    return fetch(`${base}${path}`, {
+      method: 'POST',
+      body: new URLSearchParams(fields),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      redirect: 'manual',
+    })
+  }
+
+  test('第一步换系统版本：/wizard 原地重渲染，不跳 /created', async () => {
+    const r = await post('/wizard', { os: UBUNTU, step: '0', lang: 'zh' })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('location')).toBeNull()
+    const html = await r.text()
+    expect(html).toContain('class="os-cards"')
+    expect(html).not.toContain('class="result-card"')
+  })
+
+  test('点下一步：进入第二步，仍然不建 Pod', async () => {
+    const r = await post('/wizard', {
+      os: UBUNTU,
+      step: '0',
+      lang: 'zh',
+      action: 'next',
+    })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('location')).toBeNull()
+    const html = await r.text()
+    expect(html).toContain('class="res-form"')
+    expect(html).toContain('id="cpu"')
+    expect(html).not.toContain('class="result-card"')
+  })
+
+  test('点上一步：回到第一步，带着之前选的系统', async () => {
+    const r = await post('/wizard', {
+      os: UBUNTU,
+      step: '1',
+      lang: 'zh',
+      cpu: '2',
+      mem: '1024',
+      ttl: '4',
+      action: 'back',
+    })
+    const html = await r.text()
+    expect(html).toContain('class="os-cards"')
+    expect(html).toMatch(new RegExp(`<option value="${UBUNTU}" selected>`))
+  })
+
+  test('★ 第二步点创建：只弹确认 Modal，不建 Pod', async () => {
+    const r = await post('/create', {
+      os: UBUNTU,
+      cpu: '1',
+      mem: '512',
+      ttl: '1',
+      lang: 'zh',
+    })
+    expect(r.status).toBe(200)
+    // 关键：不能是 303 跳到 /created（那就是建成功了）
+    expect(r.headers.get('location')).toBeNull()
+    const html = await r.text()
+    expect(html).toContain('class="mask"')
+    expect(html).toContain('class="cfg-form"')
+    // 确认按钮才带 confirm=1
+    expect(html).toContain('name="confirm" value="1"')
+  })
+
+  test('Modal 里点取消：回到第二步，不建 Pod', async () => {
+    const r = await post('/wizard', {
+      os: UBUNTU,
+      cpu: '1',
+      mem: '512',
+      ttl: '1',
+      lang: 'zh',
+      step: '1',
+    })
+    const html = await r.text()
+    expect(html).not.toContain('class="mask"')
+    expect(html).toContain('class="res-form"')
   })
 })
 
@@ -111,6 +212,7 @@ describe('表单校验（不碰 k8s）', () => {
     })
   }
 
+  // 校验只在「已确认」之后才跑，所以每条都带 confirm=1
   test('CPU 超范围 -> 400 + 错误文案', async () => {
     const r = await post({
       os: 'ghcr.io/20020314/sandbox-ubuntu-22.04:latest',
@@ -118,9 +220,12 @@ describe('表单校验（不碰 k8s）', () => {
       mem: '512',
       ttl: '1',
       lang: 'zh',
+      confirm: '1',
     })
     expect(r.status).toBe(400)
-    expect(await r.text()).toContain('CPU')
+    const html = await r.text()
+    expect(html).toContain('CPU')
+    expect(html).toContain('class="err-banner"')
   })
 
   test('内存超范围 -> 400', async () => {
@@ -130,6 +235,7 @@ describe('表单校验（不碰 k8s）', () => {
       mem: '999999',
       ttl: '1',
       lang: 'zh',
+      confirm: '1',
     })
     expect(r.status).toBe(400)
   })
@@ -141,12 +247,20 @@ describe('表单校验（不碰 k8s）', () => {
       mem: '512',
       ttl: '999',
       lang: 'zh',
+      confirm: '1',
     })
     expect(r.status).toBe(400)
   })
 
   test('不存在的 OS -> 400（不是 500）', async () => {
-    const r = await post({ os: 'evil:latest', cpu: '1', mem: '512', ttl: '1', lang: 'zh' })
+    const r = await post({
+      os: 'evil:latest',
+      cpu: '1',
+      mem: '512',
+      ttl: '1',
+      lang: 'zh',
+      confirm: '1',
+    })
     expect(r.status).toBe(400)
   })
 })
@@ -182,12 +296,13 @@ describe('安全', () => {
 describe('/created 的待启动标记', () => {
   const q = 'lang=zh&os=ghcr.io/20020314/sandbox-alpine-3.20:latest&cpu=1&mem=128&ttl=1'
 
-  test('就绪：显示「已创建」，无 wait 样式', async () => {
+  test('就绪：显示「您已创建系统」，没有启动中提示', async () => {
     const r = await fetch(`${base}/created?id=instantbox-managed-abc123&url=/console/instantbox-managed-abc123/&${q}`)
     const html = await r.text()
     expect(r.status).toBe(200)
     expect(html).toContain('您已创建系统')
-    expect(html).not.toContain('notice wait')
+    expect(html).toContain('class="result-card"')
+    expect(html).not.toContain('class="spin-text"')
   })
 
   test('未就绪：显示「系统正在启动」，并且仍给打开按钮', async () => {
@@ -196,10 +311,11 @@ describe('/created 的待启动标记', () => {
     )
     const html = await r.text()
     expect(r.status).toBe(200)
-    expect(html).toContain('系统正在启动')
-    expect(html).toContain('notice wait')
+    // spin-text 里的长句就是「镜像还在拉取，系统启动中…」
+    expect(html).toContain('class="spin-text"')
+    expect(html).toContain('系统启动中')
     // 关键：不能被当成失败（bug 就是这个：Pod 建好了但显示失败）
-    expect(html).not.toContain('notice err')
+    expect(html).not.toContain('class="err-banner"')
     expect(html).toContain('/console/instantbox-managed-abc123/')
   })
 })

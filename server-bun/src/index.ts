@@ -322,32 +322,109 @@ function formErrorText(code: string, locale: PageState['locale']): string {
   }
 }
 
-/** POST /create —— 建沙箱后直接渲染结果页 */
+/**
+ * 从表单里捞出向导的四个字段。
+ *
+ * 表单在各步之间来回提交，不管当前显示哪一步，cpu/mem/ttl 都可能还没渲染出来
+ * （第一步只有系统卡片）。所以缺省值在这里补齐，不能让空串流进 validateForm。
+ */
+interface WizardFields {
+  locale: PageState['locale']
+  osName: string
+  cpu: string
+  mem: string
+  ttl: string
+}
+
+function wizardFields(form: FormData): WizardFields {
+  return {
+    locale: pickLocale(String(form.get('lang') ?? '') || null),
+    osName: String(form.get('os') ?? ''),
+    cpu: String(form.get('cpu') ?? '') || '1',
+    mem: String(form.get('mem') ?? '') || '512',
+    ttl: String(form.get('ttl') ?? '') || '24',
+  }
+}
+
+/**
+ * 向导中途的重渲染（不建任何东西）。
+ *
+ * 复刻原版 SelectSystemConfig 的交互语义：
+ *   * 第一步选系统 / 换版本 —— 原版是 setState，这里等于一次表单重提
+ *   * Next / Back           —— 切 step
+ *   * 第二步点 Create       —— 原版弹 Modal（modalVisible=true），确认才调 API
+ *
+ * 状态全部走 POST body 往返，服务端无 session：刷新页面就回到第一步，
+ * 这是有意的（避免「换个浏览器还记着上次没确认的配置」）。
+ */
+function renderWizard(
+  f: WizardFields,
+  step: 0 | 1,
+  confirm: boolean,
+  error?: string,
+): Response {
+  const extra: Partial<PageState> = {
+    locale: f.locale,
+    selectedOs: f.osName,
+    cpu: f.cpu,
+    mem: f.mem,
+    ttl: f.ttl,
+    step,
+    confirm,
+    error,
+  }
+  return html(
+    renderToString(
+      renderPage({
+        locale: f.locale,
+        osList: getManager().osList,
+        selectedOs: f.osName,
+        ...extra,
+      }),
+    ),
+    error && step === 1 ? 400 : 200,
+  )
+}
+
+/**
+ * POST /wizard —— 向导所有「不建东西」的动作入口。
+ *
+ * 从 <select onchange="this.form.requestSubmit()"> 提交过来时没有 action 字段，
+ * 这种就是「只是换了个系统版本」，原地重渲染当前步即可。
+ */
+async function handleWizard(req: Request): Promise<Response> {
+  const form = await req.formData()
+  const f = wizardFields(form)
+  const action = String(form.get('action') ?? '')
+  const cur = form.get('step') === '1' ? 1 : 0
+
+  if (action === 'next') return renderWizard(f, 1, false)
+  if (action === 'back') return renderWizard(f, 0, false)
+  // noop / 无 action（换版本 / 换语言）：留在当前步
+  return renderWizard(f, cur, false)
+}
+
+/** POST /create —— 第二步 Create 的入口：先弹确认框，确认后才真建 */
 async function handleCreate(req: Request): Promise<Response> {
   const form = await req.formData()
-  const locale = pickLocale(String(form.get('lang') ?? '') || null)
-  const osName = String(form.get('os') ?? '')
-  const cpu = String(form.get('cpu') ?? '')
-  const mem = String(form.get('mem') ?? '')
-  const ttl = String(form.get('ttl') ?? '')
+  const f = wizardFields(form)
+  const { locale, osName, cpu, mem, ttl } = f
+  const action = String(form.get('action') ?? '')
+  const confirm = form.get('confirm') === '1'
+
+  // 第一步的 Create 是禁用的，正常到不了这里；万一绕过了就退回第一步
+  if (action === 'next') return renderWizard(f, 1, false)
+  if (action === 'back') return renderWizard(f, 0, false)
+  if (action === 'noop') return renderWizard(f, 0, false)
+
+  // ★ 关键分流：还没确认 → 只弹 Modal，不建 Pod。
+  //   原版也是「点 Create 只 setState(modalVisible=true)」，
+  //   Modal 里点 OK 才真正调 API。之前少了这一层，
+  //   选版本时的一次 requestSubmit() 就把 Pod 建出来了。
+  if (!confirm) return renderWizard(f, 1, true)
 
   const bad = validateForm(cpu, mem, ttl, osName)
-  if (bad) {
-    return html(
-      renderToString(
-        renderPage({
-          locale,
-          osList: getManager().osList,
-          selectedOs: osName,
-          cpu,
-          mem,
-          ttl,
-          error: formErrorText(bad, locale),
-        }),
-      ),
-      400,
-    )
-  }
+  if (bad) return renderWizard(f, 1, false, formErrorText(bad, locale))
 
   const mgr = getManager()
   const maxTimeout = MAX_TIMEOUT_AHEAD + Date.now() / 1000
@@ -355,20 +432,7 @@ async function handleCreate(req: Request): Promise<Response> {
 
   const name = await mgr.create({ mem, cpu, osName, expireAt })
   if (!name) {
-    return html(
-      renderToString(
-        renderPage({
-          locale,
-          osList: mgr.osList,
-          selectedOs: osName,
-          cpu,
-          mem,
-          ttl,
-          error: strings[locale].sentence['err-creation'],
-        }),
-      ),
-      503,
-    )
+    return renderWizard(f, 1, false, strings[locale].sentence['err-creation'])
   }
 
   // 等 Pod 真的 Running 再去结果页。否则用户点「打开系统」会吃到 502，
@@ -377,20 +441,7 @@ async function handleCreate(req: Request): Promise<Response> {
   if (ready === 'failed') {
     // 确实是失败：把半成品删掉，别留垃圾 Pod
     await mgr.rm(name).catch(() => {})
-    return html(
-      renderToString(
-        renderPage({
-          locale,
-          osList: mgr.osList,
-          selectedOs: osName,
-          cpu,
-          mem,
-          ttl,
-          error: strings[locale].sentence['err-creation'],
-        }),
-      ),
-      503,
-    )
+    return renderWizard(f, 1, false, strings[locale].sentence['err-creation'])
   }
 
   // 用 303 跳转，避免刷新页面重复建沙箱；同时让 URL 干净
@@ -413,6 +464,7 @@ function handleCreated(url: URL, req: Request): Response {
   const id = url.searchParams.get('id') ?? ''
   const shareUrl = url.searchParams.get('url') ?? (id ? `/console/${id}` : '')
   return renderHome(url, req, {
+    created: true,
     containerId: id,
     shareUrl,
     pending: url.searchParams.get('pending') === '1',
@@ -474,6 +526,7 @@ const server = Bun.serve<WsState>({
     }
 
     // ---- 前端表单（浏览器）
+    if (pathname === '/wizard' && req.method === 'POST') return handleWizard(req)
     if (pathname === '/create' && req.method === 'POST') return handleCreate(req)
     if (pathname === '/purge' && req.method === 'POST') return handlePurge(req)
     if (pathname === '/created') return handleCreated(url, req)
