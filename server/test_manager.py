@@ -113,7 +113,8 @@ def test_no_port_option_anywhere(mgr, monkeypatch):
     data = res.get_json()
     assert data['statusCode'] == 1
     assert data['openPort'] is None
-    assert data['shareUrl'].endswith('/' + data['containerId'])
+    # 本模块设了 INSTANTBOX_CONSOLE_DOMAIN=box.example.com，shareUrl 是完整域名
+    assert data['containerId'] in data['shareUrl']
     # 即使客户端传了 port，也不会写进 Pod
     body = mgr.core.created_bodies[0]
     assert body.spec.containers[0].ports[0].container_port == 1588
