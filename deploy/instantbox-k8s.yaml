@@ -104,7 +104,9 @@ spec:
       containers:
         - name: server
           image: ghcr.io/20020314/instantbox-server:latest
-          imagePullPolicy: IfNotPresent
+          # 用 :latest 必须 Always，否则节点上留着旧镜像就永远不更新。
+          # 想省拉取开销就改用 :sha-xxxxxxx 这类不可变 tag + IfNotPresent。
+          imagePullPolicy: Always
           envFrom:
             - configMapRef: {name: instantbox-config}
           ports:
@@ -160,7 +162,7 @@ spec:
       containers:
         - name: nginx
           image: ghcr.io/20020314/instantbox-frontend:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - {name: http, containerPort: 8080}
           readinessProbe:
