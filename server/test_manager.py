@@ -275,3 +275,127 @@ def test_pod_name_is_dns1123(mgr):
         assert im.POD_NAME_RE.match(name), name
         assert len(name) <= 63                        # k8s 名字上限
         assert name.startswith(im.InstantboxManager.CONTAINER_PREFIX)
+
+
+# --------------------------------------------------------------- 等待就绪中转页
+#
+# 背景：Pod 刚创建时 /console/<pod> 会 502（Service 没建好或 ttyd 还没监听）。
+# 现在裸路径统一进中转页，页面轮询 /_state/<pod>，ready 了再跳 /_console。
+
+class FakeCS:
+    """container_statuses 的最小替身。ready=False 时带上 waiting.reason。"""
+
+    def __init__(self, ready, reason=None, message=''):
+        self.ready = ready
+        self.state = type('State', (), {
+            'waiting': type('W', (), {'reason': reason, 'message': message})() if reason else None,
+            'terminated': None,
+        })()
+
+
+def _pod(name, phase='Pending', ready=False, reason=None, deletion_ts=None):
+    p = FakePod(name, {'app': name})
+    p.metadata.deletion_timestamp = deletion_ts
+    p.status = type('S', (), {
+        'phase': phase,
+        'pod_ip': None,
+        'reason': reason,
+        'container_statuses': [FakeCS(ready, reason)],
+    })()
+    return p
+
+
+def test_state_gone_when_pod_missing(mgr):
+    assert mgr.get_sandbox_state('instantbox-managed-nothere1234')[0] == 'gone'
+
+
+def test_state_rejects_bad_names(mgr):
+    """名字来自 URL，必须挡住路径穿越 / 前后缀不符。"""
+    assert mgr.get_sandbox_state('../../etc/passwd')[0] == 'gone'
+    assert mgr.get_sandbox_state('instantbox_managed_abc')[0] == 'gone'
+    assert mgr.get_sandbox_state('')[0] == 'gone'
+
+
+def test_state_pending_while_container_not_ready(mgr):
+    """★ 核心断言：phase=Running 但容器没 Ready，仍然是 pending。
+
+    这就是原来会 502 的窗口：Pod 已经 Running，Service 也有了，
+    但 ttyd 还没开始监听，Caddy 反代过去就是 502。
+    """
+    name = 'instantbox-managed-pendingabc12'
+    mgr.core.pods[name] = _pod(name, phase='Running', ready=False,
+                               reason='ContainerCreating')
+    state, detail = mgr.get_sandbox_state(name)
+    assert state == 'pending'
+    assert 'ContainerCreating' in detail
+
+
+def test_state_ready_only_when_all_containers_ready(mgr):
+    name = 'instantbox-managed-readyabc1234'
+    mgr.core.pods[name] = _pod(name, phase='Running', ready=True)
+    assert mgr.get_sandbox_state(name) == ('ready', 'ok')
+
+
+def test_state_terminating(mgr):
+    name = 'instantbox-managed-dyingabc1234'
+    mgr.core.pods[name] = _pod(name, phase='Running', ready=True,
+                               deletion_ts='2026-01-01T00:00:00Z')
+    assert mgr.get_sandbox_state(name)[0] == 'terminating'
+
+
+def test_state_failed_when_phase_terminal(mgr):
+    name = 'instantbox-managed-failedabc123'
+    mgr.core.pods[name] = _pod(name, phase='Failed', ready=False)
+    assert mgr.get_sandbox_state(name)[0] == 'failed'
+
+
+def test_state_forbidden_is_not_gone(mgr):
+    """API 出错要报 forbidden，不能当成 gone —— 否则页面会说"沙箱已过期"误导用户。"""
+
+    class DeniedCore(FakeCore):
+        def read_namespaced_pod(self, name, namespace):
+            raise ApiException(status=403)
+
+    mgr.core = DeniedCore()
+    assert mgr.get_sandbox_state('instantbox-managed-whatever123')[0] == 'forbidden'
+
+
+def test_wait_page_renders_and_is_uncacheable(mgr, monkeypatch):
+    import inspire
+    monkeypatch.setattr(inspire, '_manager', mgr)
+    name = 'instantbox-managed-pageabc1234'
+    res = inspire.app.test_client().get('/_wait/{}'.format(name))
+    assert res.status_code == 200
+    assert res.mimetype == 'text/html'
+    # ★ 不能缓存：否则第二次打开会闪进上次"已就绪"的状态
+    assert 'no-store' in res.headers['Cache-Control']
+    body = res.get_data(as_text=True)
+    # 页面里三个关键地址都要被正确注入
+    assert '/_state/{}'.format(name) in body
+    assert '/console/{}/_console'.format(name) in body
+    assert name in body
+    # 不能有裸的 __CFG__ 残留（模板没被替换会直接白屏）
+    assert '__CFG__' not in body
+
+
+def test_state_endpoint_contract(mgr, monkeypatch):
+    import inspire
+    monkeypatch.setattr(inspire, '_manager', mgr)
+    name = 'instantbox-managed-stateabc123'
+    mgr.core.pods[name] = _pod(name, phase='Running', ready=False, reason='PodInitializing')
+    data = inspire.app.test_client().get('/_state/{}'.format(name)).get_json()
+    assert data['state'] == 'pending'
+    assert 'PodInitializing' in data['detail']
+
+    mgr.core.pods[name] = _pod(name, phase='Running', ready=True)
+    data = inspire.app.test_client().get('/_state/{}'.format(name)).get_json()
+    assert data['state'] == 'ready'
+
+
+def test_share_url_unchanged_by_wait_page(mgr):
+    """shareUrl 仍然指向裸路径 —— 中转页是靠网关 302 进来的，不要改前端契约。"""
+    name = mgr.is_create_container(512, 1, 'ghcr.io/20020314/sandbox-alpine-3.20:latest',
+                                   time.time() + 60)
+    url = mgr.share_url(name)
+    assert url.endswith('/' + name)
+    assert '_wait' not in url and '_console' not in url

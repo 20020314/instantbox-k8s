@@ -179,6 +179,73 @@ class InstantboxManager(object):
             'podIP': status.pod_ip if status else None,
         }
 
+    def get_sandbox_state(self, container_name):
+        """给「等待就绪」中转页用的粗粒度状态。
+
+        返回 (state, detail)，state 取值：
+          ready      —— 容器全部 Ready，ttyd 在监听，可以进终端
+          pending    —— 正在调度 / 拉镜像 / 启动，继续等
+          gone       —— 查无此 Pod（已被 TTL 回收、手删、或名字打错）
+          terminating—— 正在删除
+          forbidden  —— 鉴权或 API 出错（**不要当成 gone**，否则会误导成"已过期"）
+          failed     —— 容器已死且不会自己恢复
+
+        ★ 为什么不用 pod.status.phase 判断：
+          从创建到 Running 的十几秒~几分钟里 phase 一直是 Pending，
+          但 ttyd 真正能握手要等到容器 Ready。直接开窗的话，Caddy 反代到
+          一个还没起来的 Pod 就是 502 —— 这正是要做中转页的原因。
+          所以判据必须是 containerStatuses[].ready 全为 True。
+        """
+        # 名字从 URL 拿来，必须挡住路径穿越和 SSRF
+        if not container_name or not container_name.startswith(self.CONTAINER_PREFIX):
+            return 'gone', 'name not allowed'
+        if not POD_NAME_RE.match(container_name):
+            return 'gone', 'invalid name'
+
+        try:
+            pod = self.core.read_namespaced_pod(container_name, self.namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                return 'gone', 'pod not found'
+            if exc.status == 403:
+                return 'forbidden', 'rbac denied'
+            return 'forbidden', 'api error {}'.format(exc.status)
+
+        meta = pod.metadata
+        if meta is not None and meta.deletion_timestamp:
+            return 'terminating', 'pod is being deleted'
+
+        status = pod.status
+        if status is None:
+            return 'pending', 'no status yet'
+
+        phase = status.phase or 'Unknown'
+        if phase in ('Succeeded', 'Failed'):
+            return 'failed', 'phase {}'.format(phase)
+
+        statuses = status.container_statuses or []
+        if not statuses:
+            # 调度中 / 容器还没创建
+            return 'pending', (status.reason or 'Scheduling')
+
+        for cs in statuses:
+            if cs.ready:
+                continue
+            waiting = getattr(cs.state, 'waiting', None) if cs.state else None
+            terminated = getattr(cs.state, 'terminated', None) if cs.state else None
+            if waiting is not None:
+                reason = waiting.reason or 'Waiting'
+                detail = waiting.message or ''
+                return 'pending', ('{}: {}'.format(reason, detail) if detail else reason)
+            if terminated is not None:
+                return 'failed', 'terminated ({})'.format(
+                    terminated.reason or terminated.exit_code)
+            return 'pending', 'container not ready'
+
+        if phase != 'Running':
+            return 'pending', phase
+        return 'ready', 'ok'
+
     def touch(self, container_name):
         """记录最后一次访问时间，供空闲回收使用。失败静默。"""
         if cfg.IDLE_TIMEOUT <= 0:

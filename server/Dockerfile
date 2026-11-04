@@ -13,7 +13,7 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY config.py inspire.py ./
+COPY config.py inspire.py console_page.py ./
 COPY api/ ./api/
 # 镜像清单随镜像一起发布，避免运行时还要联网
 COPY manifest.json ./

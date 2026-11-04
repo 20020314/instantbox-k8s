@@ -90,4 +90,44 @@ for dep_doc in [d for d in docs if d['kind'] == 'Deployment']:
             dep_doc['metadata']['name'])
 print('[ok] 所有 Deployment 无 hostPath')
 
+
+# ---------------------------------------------------------------- Caddyfile 路由
+#
+# 中转页能不能用，完全取决于 Caddy 的**匹配顺序**。这里做静态检查：
+# 这类问题一旦回归，表现是"点打开就 502"或"跳转自环"，肉眼极难定位。
+import io
+import os
+import re
+
+CADDY = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend', 'Caddyfile')
+if os.path.exists(CADDY):
+    with io.open(CADDY, encoding='utf-8') as fh:
+        caddy = fh.read()
+
+    # 1) 中转页 / 状态查询的 handle 必须排在 /console/* 之前。
+    #    Caddy 的 handle 是有序独占匹配，/console/* 会把 /console/<pod>/_wait 吃掉，
+    #    而那时 Pod 还没起来 —— 中转页自己就 502 了。
+    pos_wait = caddy.find('handle /console/*/_wait')
+    pos_state = caddy.find('handle /console/*/_state/*')
+    pos_console = caddy.find('handle /console/* {')
+    assert pos_state != -1, 'Caddyfile 缺少 /console/*/_state/* 路由'
+    assert pos_wait != -1, 'Caddyfile 缺少 /console/*/_wait 路由'
+    assert pos_console != -1, 'Caddyfile 缺少 /console/* 路由'
+    assert pos_state < pos_console, '/console/*/_state/* 必须排在 /console/* 之前'
+    assert pos_wait < pos_console, '/console/*/_wait 必须排在 /console/* 之前'
+    print('[ok] Caddyfile: 中转页路由排在 /console/* 之前')
+
+    # 2) 真终端走 /_console 子路径，裸路径 302 进中转页（避免自环）
+    assert '_console(?:/(.*))?' in caddy, 'Caddyfile 缺少 /console/<pod>/_console 分支'
+    assert re.search(r'redir /console/\{re\.entry\.1\}/_wait', caddy), \
+        'Caddyfile 裸路径必须 302 到中转页'
+    print('[ok] Caddyfile: 裸路径 -> 中转页，终端独立在 /_console')
+
+    # 3) 占位符捕获组序号别写错：只有一个捕获组时 .2 会拿到空串
+    for bad in ('{re.entry.2}', '{re.wt.2}'):
+        assert bad not in caddy, 'Caddyfile 占位符 {} 引用了不存在的捕获组'.format(bad)
+    print('[ok] Caddyfile: 占位符捕获组序号正确')
+else:
+    print('[skip] 未找到 {}，跳过 Caddyfile 检查'.format(CADDY))
+
 print('ALL OK')

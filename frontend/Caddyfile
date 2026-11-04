@@ -73,9 +73,64 @@
 		}
 	}
 
-	# ---------------------------------------------------------------- 沙箱 webshell
+	# ------------------------------------------- 沙箱状态查询 + 等待就绪中转页
 	#
-	# 路径约定：/console/<pod-name>[/剩余路径]
+	# ★ 这两组必须放在 /console/* 之前。
+	#   Caddy 的 handle 是**有序独占匹配**：/console/* 那条会把
+	#   /console/<pod>/_wait 也一起吃进去，然后就 502 了（Pod 还没起）。
+	#   而中转页本身必须能在 Pod 没起的时候访问 —— 所以它得先被匹配到。
+	#
+	# 两种部署形态共用同一对路径：
+	#   同域相对路径 : /console/<pod>/_wait、/console/<pod>/_state/<pod>
+	#   独立域名     : /_wait/<pod>、/_state/<pod>
+	#
+	# 为什么页面对话走 server 而不是塞进静态目录：
+	#   页面里的轮询地址、跳转地址要按部署形态拼，规则在
+	#   config.console_base_url() 里只有一份，放两处迟早不一致。
+	handle /console/*/_state/* {
+		@st path_regexp st ^/console/(instantbox-managed-[a-z0-9]{4,40})/_state/(.*)$
+		handle @st {
+			rewrite * /_state/{re.st.2}
+			reverse_proxy {$UPSTREAM_API::server:65501}
+		}
+		handle {
+			respond "unknown console target" 404
+		}
+	}
+
+	handle /console/*/_wait {
+		@wt path_regexp wt ^/console/(instantbox-managed-[a-z0-9]{4,40})/_wait$
+		handle @wt {
+			rewrite * /_wait/{re.wt.1}
+			reverse_proxy {$UPSTREAM_API::server:65501}
+		}
+		handle {
+			respond "unknown console target" 404
+		}
+	}
+
+	# 独立域名形态
+	handle /_wait/* {
+		@w2 path_regexp w2 ^/_wait/(instantbox-managed-[a-z0-9]{4,40})$
+		handle @w2 {
+			reverse_proxy {$UPSTREAM_API::server:65501}
+		}
+		handle {
+			respond "unknown console target" 404
+		}
+	}
+
+	handle /_state/* {
+		@s2 path_regexp s2 ^/_state/(instantbox-managed-[a-z0-9]{4,40})$
+		handle @s2 {
+			reverse_proxy {$UPSTREAM_API::server:65501}
+		}
+		handle {
+			respond "unknown console target" 404
+		}
+	}
+
+	# ---------------------------------------------------------------- 沙箱 webshell
 	#
 	# 裸 Pod 没有 A 记录（那是 docker compose 的行为），所以 server 建 Pod 时会给它
 	# 配一个同名 headless Service，解析走 <pod>.<ns>.svc.cluster.local。
@@ -90,29 +145,70 @@
 	# ★ 名字限制在 instantbox-managed-[a-z0-9]{4,40}：不能带点、斜杠、@，
 	#   否则拼进 upstream 就成了 SSRF。
 	#
+	# ---- 本层的分流规则 ----
+	#
+	#   /console/<pod>                     -> 302 到中转页（永远能用，不会 502）
+	#   /console/<pod>/_wait               -> server 的中转页（上面已处理）
+	#   /console/<pod>/_console[/剩余]     -> ttyd 真终端
+	#   /console/<pod>/其它子路径          -> 直接透传给 ttyd（兼容老链接 / token 直链）
+	#
+	# 为什么裸路径不能直接透传 ttyd：
+	#   官方前端的 shareUrl 就是这个裸路径，Pod 没起好时反代只能给 502。
+	#   它必须交给能判断就绪状态的那一层（server 的中转页），
+	#   就绪后中转页自己 location.replace 到 /_console，用户几乎无感。
+	#
+	# 为什么真终端单独占 /_console 子路径：
+	#   中转页和终端不能共用同一个 URL（否则跳转就是自环）；用子路径还能保证
+	#   ttyd 的相对资源（/token、/ws、静态文件）不会和中转页的 /_wait 打架。
+	#
+	# ★ 占位符语义（踩过）：
+	#   `rewrite` / `redir` 里写 {re.xxx.N}，N 是该 regexp 的**捕获组序号**。
+	#   只有一个捕获组就只能写 {re.entry.1}，写成 .2 拿到的是空串。
+	#
 	handle /console/* {
-		@console path_regexp console ^/console/(instantbox-managed-[a-z0-9]{4,40})(?:/(.*))?$
-
-		handle @console {
-			# 有剩余路径：直接剥掉 /console/<pod> 前缀透传
-			@has_rest vars {re.console.2} != ""
-			handle @has_rest {
-				uri strip_prefix /console/{re.console.1}
-				reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+		# --- 真终端
+		@tty path_regexp tty ^/console/(instantbox-managed-[a-z0-9]{4,40})/_console(?:/(.*))?$
+		handle @tty {
+			@rest vars {re.tty.2} != ""
+			handle @rest {
+				uri strip_prefix /console/{re.tty.1}/_console
+				reverse_proxy {re.tty.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
 					import console_proxy
 				}
 			}
-
-			# 无尾斜杠：上游就是 `/`（nginx 在这里 500）
 			handle {
 				rewrite * /
-				reverse_proxy {re.console.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+				reverse_proxy {re.tty.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
 					import console_proxy
 				}
 			}
 		}
 
-		# 名字不合规：明确 404，绝不漏到静态兜底
+		# --- 裸路径 / 尾斜杠：进中转页
+		@entry path_regexp entry ^/console/(instantbox-managed-[a-z0-9]{4,40})/?$
+		handle @entry {
+			redir /console/{re.entry.1}/_wait 302
+		}
+
+		# --- 其它子路径：兼容既有链接，直接透传
+		@other path_regexp other ^/console/(instantbox-managed-[a-z0-9]{4,40})(?:/(.*))?$
+		handle @other {
+			@has_rest vars {re.other.2} != ""
+			handle @has_rest {
+				uri strip_prefix /console/{re.other.1}
+				reverse_proxy {re.other.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+					import console_proxy
+				}
+			}
+			handle {
+				rewrite * /
+				reverse_proxy {re.other.1}.{$POD_NAMESPACE::instantbox}.svc.cluster.local:{$TTYD_PORT::1588} {
+					import console_proxy
+				}
+			}
+		}
+
+		# --- 名字不合规：明确 404，绝不漏到静态兜底
 		handle {
 			respond "unknown console target" 404
 		}
@@ -133,4 +229,3 @@
 		file_server
 	}
 }
-
