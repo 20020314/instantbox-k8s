@@ -206,35 +206,46 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
       # 装 qemu（binfmt），让 CI 里能真的跑起来 arm64 的镜像做冒烟测试。
-      # buildx 交叉编译只能证明「编得出来」，证明不了「跑得起来」——
-      # 这次线上 exec /usr/bin/caddy: operation not permitted 就是后者。
-      # --load 一次只能装一种架构，所以先按 arm64（线上实际架构）load 出来跑，
+      # buildx 交叉编译只能证明「编得出来」，证明不了「跑得起来」。
+      # --load 一次只能装一种架构，所以先按 arm64 load 出来跑冒烟，
       # 再单独做多架构推送。
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Build gateway (arm64, load locally)
         uses: docker/build-push-action@v6
-        continue-on-error: true
         with:
           context: ./frontend
           target: gateway
           platforms: linux/arm64
           load: true
-          tags: instantbox-gateway:prime
+          tags: instantbox-gateway:smoke
           build-args: |
             NPM_REGISTRY=https://registry.npmmirror.com
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
-      # 冒烟测试：镜像最基本的承诺就是「caddy 能在这个架构上跑起来」。
-      # 构建期直接执行，不绿就不推 —— 免得线上看到
-      # exec /usr/bin/caddy: operation not permitted 再回头猜。
-      - name: Smoke test caddy binary
+      # ★ 回归测试：把线上那次事故的条件原样复现一遍。
+      #
+      # 线上 Pod 的 securityContext 是 capabilities.drop=[ALL] + runAsUser=1000，
+      # 而官方 caddy 镜像的 /usr/bin/caddy 带 setcap cap_net_bind_service=+ep。
+      # CapBnd 里没有这个 cap 时，内核 execve 直接 EPERM，
+      # 日志只有一句 exec /usr/bin/caddy: operation not permitted。
+      #
+      # 所以冒烟必须带 --cap-drop ALL --user 1000，否则在 CI 里怎么跑都是绿的，
+      # 上线继续炸。镜像里已经把 xattr 抹掉，这条应该通过。
+      - name: Smoke test（模拟 drop ALL + 非 root 的 Pod 环境）
         run: |
           set -eux
-          docker run --rm --platform linux/arm64 --entrypoint /usr/bin/caddy \
-            instantbox-gateway:prime version
+          echo "--- 断言 1：drop ALL + uid 1000 下 caddy 必须能跑"
+          docker run --rm --platform linux/arm64 \
+            --cap-drop ALL --user 1000:1000 \
+            --entrypoint /usr/bin/caddy instantbox-gateway:smoke version
+          echo "--- 断言 2：Caddyfile 语法可用"
+          docker run --rm --platform linux/arm64 \
+            --cap-drop ALL --user 1000:1000 \
+            --entrypoint /usr/bin/caddy instantbox-gateway:smoke \
+            validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
       - name: Build & push (multi-arch)
         uses: docker/build-push-action@v6

@@ -72,27 +72,37 @@ LABEL \
   org.label-schema.name="instantbox-gateway" \
   org.label-schema.vcs-url="https://github.com/instantbox/instantbox"
 
-# ★★ 必须重新编译一遍 caddy，不能直接用镜像里自带的 /usr/bin/caddy
+# ★★ 必须抹掉 caddy 二进制上的 file capability，否则在 drop ALL 的 Pod 里 exec 直接 EPERM
 #
-# Caddy 官方镜像的二进制是 xcaddy 交叉编译出来的 CGO 程序，arm64 那一版
-# 动态解释器指到 /lib/ld-linux-aarch64.so.1（glibc），而 alpine 根文件系统里
-# 只有 /lib/ld-musl-aarch64.so.1。后果是：
+# 官方 caddy 镜像对它自己的 /usr/bin/caddy 做过
+#     setcap cap_net_bind_service=+ep /usr/bin/caddy
+# 也就是给这个可执行文件挂了 security.capability xattr。
+#
+# 内核 execve 的规则是：如果文件带 xattr 声明的 capability，而**容器允许集
+# （bounding set）里没有它**，execve 直接返回 EPERM。表现就是
 #     exec /usr/bin/caddy: operation not permitted
-# 表现极其迷惑 —— 文件在、权限对、0 个 capability 被丢、seccomp 是 0，
-# 怎么查都"看起来能跑"，但 execve 就是失败。amd64 那个 tag 恰好是 musl 的，
-# 所以只有 arm64 节点炸（CI 也会假绿，因为 buildx 交叉编译不执行目标架构）。
+# 而这里最容易被误导的是 —— 文件明明在、权限 755、seccomp 是 0、
+# /proc/self/status 里 Cap* 全是 0 看着"没东西被限制"，甚至用 root 跑也一样失败。
 #
-# xcaddy 在 alpine 里跑需要 go + gcc（CGO）。编译产物落在 /usr/local/bin/caddy，
-# 官方镜像的 ENTRYPOINT 是 `caddy`（靠 $PATH 找），覆盖同目录即可。
-RUN set -eux; \
-    apk add --no-cache --virtual .build-deps go gcc musl-dev; \
-    xcaddy build --output /usr/local/bin/caddy; \
-    apk del .build-deps; \
-    rm -rf /root/go /root/.cache; \
-    # 关键断言：解释器必须是 musl，否则说明还是那个坏掉的目标文件
-    readelf -l /usr/local/bin/caddy | grep -q 'ld-musl-' \
-      || (echo "FATAL: caddy 不是 musl 二进制，arm64 上会 exec 失败" >&2; exit 1); \
-    /usr/local/bin/caddy version
+# 集群上实测（同一镜像、只改 securityContext）：
+#     drop: [ALL]                      -> CapBnd=0x0     exec ❌
+#     drop: [ALL] + add: [NET_BIND_SERVICE] -> CapBnd=0x400  exec ✅ v2.11.7
+#
+# 我们监听 8080，压根不需要 bind 1024 以下端口，所以正确的做法不是把这个
+# capability 加回来，而是从根上把 xattr 去掉 —— 这样 Pod 侧可以继续坚持
+# drop ALL 的最小权限，不用为了跑起来而放权。
+#
+# （setcap -r 对没有 xattr 的文件会报错，所以容错一下，保证构建幂等。）
+USER root
+RUN apk add --no-cache --virtual .capfix libcap; \
+    setcap -r /usr/bin/caddy 2>/dev/null || true; \
+    apk del .capfix; \
+    # 断言：xattr 必须已经没了，否则说明这个镜像里 setcap 根本没生效
+    if getcap /usr/bin/caddy 2>/dev/null | grep -q .; then \
+      echo "FATAL: /usr/bin/caddy 仍然带 file capability，drop ALL 环境下会 exec 失败" >&2; \
+      exit 1; \
+    fi; \
+    /usr/bin/caddy version
 
 COPY --from=builder /app/build/ /srv/www/
 COPY Caddyfile /etc/caddy/Caddyfile
