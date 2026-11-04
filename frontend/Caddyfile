@@ -147,7 +147,7 @@
 	#
 	# ---- 本层的分流规则 ----
 	#
-	#   /console/<pod>                     -> 302 到中转页（永远能用，不会 502）
+	#   /console/<pod>                     -> server 的中转页（永远能用，不会 502）
 	#   /console/<pod>/_wait               -> server 的中转页（上面已处理）
 	#   /console/<pod>/_console[/剩余]     -> ttyd 真终端
 	#   /console/<pod>/其它子路径          -> 直接透传给 ttyd（兼容老链接 / token 直链）
@@ -156,6 +156,7 @@
 	#   官方前端的 shareUrl 就是这个裸路径，Pod 没起好时反代只能给 502。
 	#   它必须交给能判断就绪状态的那一层（server 的中转页），
 	#   就绪后中转页自己 location.replace 到 /_console，用户几乎无感。
+	#   注意是「就地 serve 中转页」而不是 302，原因见下面 @entry 那段注释。
 	#
 	# 为什么真终端单独占 /_console 子路径：
 	#   中转页和终端不能共用同一个 URL（否则跳转就是自环）；用子路径还能保证
@@ -184,10 +185,22 @@
 			}
 		}
 
-		# --- 裸路径 / 尾斜杠：进中转页
+		# --- 裸路径 / 尾斜杠：就地吐出中转页（rewrite 到 server 的 /_wait/<pod>）
+		#
+		# ★ 这里千万不能用 `redir`。
+		#   caddy 2.11.7 实测：`redir /x/{re.e.1} 302` 被适配成
+		#     {"handler":"static_response","headers":{"Location":["302"]},"status_code":302}
+		#   —— 目标路径整个丢了，Location 变成字面量 "302"。
+		#   而单参数写法 `redir /x` 直接报 "wrong argument count"。
+		#   落到运行时就是「匹配上但零 handler 生效」，返回一个空 200，
+		#   浏览器白屏，比原来的 502 还难查。
+		#
+		#   用 rewrite + reverse_proxy 绕开：URL 保持在 shareUrl 原样，
+		#   页面里的地址全是绝对路径（server 侧渲染注入），放哪个 URL 都能跑。
 		@entry path_regexp entry ^/console/(instantbox-managed-[a-z0-9]{4,40})/?$
 		handle @entry {
-			redir /console/{re.entry.1}/_wait 302
+			rewrite * /_wait/{re.entry.1}
+			reverse_proxy {$UPSTREAM_API::server:65501}
 		}
 
 		# --- 其它子路径：兼容既有链接，直接透传

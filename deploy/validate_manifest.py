@@ -117,11 +117,21 @@ if os.path.exists(CADDY):
     assert pos_wait < pos_console, '/console/*/_wait 必须排在 /console/* 之前'
     print('[ok] Caddyfile: 中转页路由排在 /console/* 之前')
 
-    # 2) 真终端走 /_console 子路径，裸路径 302 进中转页（避免自环）
+    # 2) 真终端走 /_console 子路径，裸路径就地 serve 中转页（避免自环）
     assert '_console(?:/(.*))?' in caddy, 'Caddyfile 缺少 /console/<pod>/_console 分支'
-    assert re.search(r'redir /console/\{re\.entry\.1\}/_wait', caddy), \
-        'Caddyfile 裸路径必须 302 到中转页'
+    assert re.search(r'rewrite \* /_wait/\{re\.entry\.1\}', caddy), \
+        'Caddyfile 裸路径必须 rewrite 到 /_wait/<pod>'
     print('[ok] Caddyfile: 裸路径 -> 中转页，终端独立在 /_console')
+
+    # 2b) ★ 禁止用 redir。
+    #     caddy 2.11.7 实测把 `redir /x/{re.e.1} 302` 适配成
+    #       {"handler":"static_response","headers":{"Location":["302"]},"status_code":302}
+    #     目标路径丢失、Location 变成字面量 "302"；单参数写法直接报
+    #     "wrong argument count"。运行时表现是空 200 白屏，比 502 更难查。
+    #     本地没装 caddy，adapt 只能在集群里跑，所以只能靠静态断言拦。
+    assert not re.search(r'^\s*redir\s', caddy, re.M), \
+        'Caddyfile 不要用 redir（caddy 2.11.7 适配后 Location 会变成 "302"），改用 rewrite + reverse_proxy'
+    print('[ok] Caddyfile: 未使用 redir')
 
     # 3) 占位符捕获组序号别写错：只有一个捕获组时 .2 会拿到空串
     for bad in ('{re.entry.2}', '{re.wt.2}'):
