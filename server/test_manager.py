@@ -393,9 +393,17 @@ def test_state_endpoint_contract(mgr, monkeypatch):
 
 
 def test_share_url_unchanged_by_wait_page(mgr):
-    """shareUrl 仍然指向裸路径 —— 中转页是靠网关 302 进来的，不要改前端契约。"""
+    """shareUrl 仍然指向裸入口 —— 中转页是靠网关 302 进来的，不要改前端契约。
+
+    注意本模块设了 INSTANTBOX_CONSOLE_DOMAIN=box.example.com，
+    所以这里是子域名形态 <pod>.box.example.com，而不是路径形态。
+    （同域相对路径形态在 test_manager 里没覆盖，靠 manager.share_url 的
+      `if not domain` 分支；新增逻辑不该影响它，所以这里只校验"没被带偏"。）
+    """
     name = mgr.is_create_container(512, 1, 'ghcr.io/20020314/sandbox-alpine-3.20:latest',
                                    time.time() + 60)
     url = mgr.share_url(name)
-    assert url.endswith('/' + name)
+    assert name in url
     assert '_wait' not in url and '_console' not in url
+    # 与既有的 test_share_url 保持一致
+    assert url == 'http://{}.box.example.com'.format(name)
